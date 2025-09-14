@@ -12,7 +12,7 @@ import {
   type TokenTransaction,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc, like, and } from "drizzle-orm";
+import { eq, desc, like, ilike, and } from "drizzle-orm";
 import session from "express-session";
 import connectPg from "connect-pg-simple";
 
@@ -119,7 +119,7 @@ export class DatabaseStorage implements IStorage {
 
     if (query) {
       conditions.push(
-        like(crawledSites.title, `%${query}%`)
+        ilike(crawledSites.title, `%${query}%`)
       );
     }
 

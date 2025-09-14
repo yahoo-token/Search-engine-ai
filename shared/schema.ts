@@ -140,7 +140,7 @@ export const insertSearchQuerySchema = createInsertSchema(searchQueries).pick({
     .trim(),
   category: z.string()
     .default("all")
-    .refine(val => ["all", "web", "news", "images", "videos", "academic", "social"].includes(val), 
+    .refine(val => ["all", "shopping", "companies", "news", "saas", "cloud", "web3"].includes(val), 
       "Invalid search category"),
 });
 
