@@ -4,7 +4,15 @@ import { storage } from "./storage";
 import { setupAuth } from "./auth";
 import { generateAIResponse, categorizeSearchQuery } from "./openai";
 import { webCrawler } from "./crawler";
-import { insertSearchQuerySchema } from "@shared/schema";
+import { CrawlerCore } from "./crawler-core";
+import { 
+  insertSearchQuerySchema, 
+  insertDomainSchema, 
+  insertCrawlQueueSchema,
+  type Domain,
+  type Page,
+  type CrawlQueue
+} from "@shared/schema";
 import { ZodError } from "zod";
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -157,16 +165,374 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get crawling statistics
   app.get("/api/webmaster/stats", async (req, res) => {
     try {
-      // In a real implementation, you'd query actual statistics from the database
+      // Get real statistics from the database
+      const stats = await storage.getFetchStats();
+      const queueStats = await storage.getCrawlQueueStats();
+      const domains = await storage.listDomains('active', 1);
+      
       res.json({
-        indexedPages: "2300000",
-        crawlRate: "45200",
+        indexedPages: stats.totalFetches.toString(),
+        crawlRate: Math.round(stats.totalFetches / 24).toString(), // Per hour approximation
         lastCrawl: new Date().toISOString(),
-        activeDomains: "125000",
+        activeDomains: domains.length.toString(),
+        totalBytes: stats.totalBytes,
+        avgResponseTime: stats.avgResponseTime,
+        queueSize: queueStats.pending
       });
     } catch (error) {
       console.error("Failed to fetch webmaster stats:", error);
       res.status(500).json({ message: "Failed to fetch statistics" });
+    }
+  });
+
+  // === ADVANCED CRAWLER API ENDPOINTS ===
+
+  // Domain Management
+  app.post("/api/crawler/domains", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const validatedData = insertDomainSchema.parse(req.body);
+      
+      // Check if domain already exists
+      const existingDomain = await storage.getDomain(validatedData.domain);
+      if (existingDomain) {
+        return res.status(409).json({ message: "Domain already exists", domain: existingDomain });
+      }
+
+      // Check domain health before adding
+      const healthCheck = await CrawlerCore.checkDomainHealth(validatedData.domain);
+      if (!healthCheck.isHealthy) {
+        return res.status(400).json({ 
+          message: "Domain is not healthy", 
+          errors: healthCheck.errors 
+        });
+      }
+
+      const domain = await storage.createDomain({
+        ...validatedData,
+        status: 'active',
+        robotsTxt: JSON.stringify(healthCheck.robotsTxt),
+        robotsFetchedAt: new Date()
+      });
+
+      res.status(201).json(domain);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ 
+          message: "Validation failed",
+          errors: error.errors
+        });
+      }
+
+      console.error("Failed to add domain:", error);
+      res.status(500).json({ message: "Failed to add domain" });
+    }
+  });
+
+  app.get("/api/crawler/domains", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { status, limit = 50 } = req.query;
+      const domains = await storage.listDomains(status as string, parseInt(limit as string));
+      res.json(domains);
+    } catch (error) {
+      console.error("Failed to fetch domains:", error);
+      res.status(500).json({ message: "Failed to fetch domains" });
+    }
+  });
+
+  app.get("/api/crawler/domains/:id", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const domain = await storage.getDomainById(req.params.id);
+      if (!domain) {
+        return res.status(404).json({ message: "Domain not found" });
+      }
+
+      const pages = await storage.getPagesByDomain(domain.id, 10);
+      res.json({ ...domain, recentPages: pages });
+    } catch (error) {
+      console.error("Failed to fetch domain:", error);
+      res.status(500).json({ message: "Failed to fetch domain" });
+    }
+  });
+
+  app.patch("/api/crawler/domains/:id/status", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { status } = req.body;
+      if (!['pending', 'active', 'blocked', 'error'].includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
+      await storage.updateDomainStatus(req.params.id, status);
+      res.json({ message: "Domain status updated" });
+    } catch (error) {
+      console.error("Failed to update domain status:", error);
+      res.status(500).json({ message: "Failed to update domain status" });
+    }
+  });
+
+  // Page Management
+  app.get("/api/crawler/pages", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { query, domainId, limit = 20 } = req.query;
+      
+      let pages: Page[];
+      if (domainId) {
+        pages = await storage.getPagesByDomain(domainId as string, parseInt(limit as string));
+      } else if (query) {
+        pages = await storage.searchPages(query as string, parseInt(limit as string));
+      } else {
+        // Get recent pages if no specific query
+        pages = await storage.getPagesByDomain('', parseInt(limit as string));
+      }
+
+      res.json(pages);
+    } catch (error) {
+      console.error("Failed to fetch pages:", error);
+      res.status(500).json({ message: "Failed to fetch pages" });
+    }
+  });
+
+  app.get("/api/crawler/pages/:id", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const page = await storage.getPageById(req.params.id);
+      if (!page) {
+        return res.status(404).json({ message: "Page not found" });
+      }
+
+      const links = await storage.getLinksFromPage(page.id);
+      const fetchLogs = await storage.getFetchLogsByPage(page.id, 5);
+      
+      res.json({ 
+        ...page, 
+        outgoingLinks: links.slice(0, 20),
+        recentFetches: fetchLogs
+      });
+    } catch (error) {
+      console.error("Failed to fetch page:", error);
+      res.status(500).json({ message: "Failed to fetch page" });
+    }
+  });
+
+  // Crawl Queue Management
+  app.get("/api/crawler/queue", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const stats = await storage.getCrawlQueueStats();
+      const nextItems = await storage.getNextCrawlItems(10);
+      
+      res.json({
+        stats,
+        nextItems,
+        isRunning: false // TODO: Implement actual crawler state tracking
+      });
+    } catch (error) {
+      console.error("Failed to fetch crawl queue:", error);
+      res.status(500).json({ message: "Failed to fetch crawl queue" });
+    }
+  });
+
+  app.post("/api/crawler/queue/add", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const validatedData = insertCrawlQueueSchema.parse(req.body);
+      
+      // Check if domain exists
+      const domain = await storage.getDomainById(validatedData.domainId);
+      if (!domain) {
+        return res.status(400).json({ message: "Domain not found" });
+      }
+
+      const queueItem = await storage.addToCrawlQueue(validatedData);
+      res.status(201).json(queueItem);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({ 
+          message: "Validation failed",
+          errors: error.errors
+        });
+      }
+
+      console.error("Failed to add to crawl queue:", error);
+      res.status(500).json({ message: "Failed to add to crawl queue" });
+    }
+  });
+
+  app.delete("/api/crawler/queue/:id", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      await storage.removeCrawlQueueItem(req.params.id);
+      res.json({ message: "Queue item removed" });
+    } catch (error) {
+      console.error("Failed to remove queue item:", error);
+      res.status(500).json({ message: "Failed to remove queue item" });
+    }
+  });
+
+  // Crawler Monitoring & Control
+  app.get("/api/crawler/stats", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { since } = req.query;
+      const sinceDate = since ? new Date(since as string) : undefined;
+      
+      const fetchStats = await storage.getFetchStats(sinceDate);
+      const queueStats = await storage.getCrawlQueueStats();
+      const activeDomains = await storage.listDomains('active', 5);
+      
+      res.json({
+        fetch: fetchStats,
+        queue: queueStats,
+        activeDomains: activeDomains.length,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error("Failed to fetch crawler stats:", error);
+      res.status(500).json({ message: "Failed to fetch crawler stats" });
+    }
+  });
+
+  app.get("/api/crawler/logs", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { limit = 50, pageId } = req.query;
+      
+      let logs;
+      if (pageId) {
+        logs = await storage.getFetchLogsByPage(pageId as string, parseInt(limit as string));
+      } else {
+        logs = await storage.getRecentFetchLogs(parseInt(limit as string));
+      }
+      
+      res.json(logs);
+    } catch (error) {
+      console.error("Failed to fetch logs:", error);
+      res.status(500).json({ message: "Failed to fetch logs" });
+    }
+  });
+
+  // Advanced crawl endpoint using new crawler core
+  app.post("/api/crawler/crawl-url", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { url, respectRobots = true } = req.body;
+      
+      if (!url) {
+        return res.status(400).json({ message: "URL is required" });
+      }
+
+      const startTime = Date.now();
+      const result = await CrawlerCore.crawlUrl(url, { respectRobots });
+      const duration = Date.now() - startTime;
+
+      // Save results to database
+      const urlObj = new URL(url);
+      const domainName = urlObj.hostname;
+      
+      // Get or create domain
+      let domain = await storage.getDomain(domainName);
+      if (!domain) {
+        domain = await storage.createDomain({
+          domain: domainName,
+          status: 'active',
+          robotsTxt: JSON.stringify(result.robotsTxt),
+          robotsFetchedAt: new Date()
+        });
+      }
+
+      // Create page record
+      const page = await storage.createPage({
+        domainId: domain.id,
+        url: result.fetchResult.url,
+        httpStatus: result.fetchResult.status,
+        contentHash: result.extractedContent.contentHash,
+        title: result.extractedContent.title,
+        description: result.extractedContent.description,
+        textContent: result.extractedContent.textContent,
+        meta: result.extractedContent.meta,
+        lang: result.extractedContent.lang,
+        etag: result.fetchResult.etag,
+        lastModified: result.fetchResult.lastModified ? new Date(result.fetchResult.lastModified) : undefined
+      });
+
+      // Save links
+      if (result.extractedContent.links.length > 0) {
+        const links = result.extractedContent.links.map(link => ({
+          fromPageId: page.id,
+          toUrl: link,
+          nofollow: false
+        }));
+        await storage.saveLinks(links);
+      }
+
+      // Create fetch log
+      await storage.createFetchLog({
+        pageId: page.id,
+        url: result.fetchResult.url,
+        startedAt: new Date(Date.now() - duration),
+        finishedAt: new Date(),
+        bytes: result.fetchResult.size,
+        durationMs: duration,
+        httpStatus: result.fetchResult.status
+      });
+
+      res.json({
+        message: "URL crawled successfully",
+        page,
+        extractedContent: result.extractedContent,
+        fetchStats: {
+          duration,
+          size: result.fetchResult.size,
+          status: result.fetchResult.status
+        }
+      });
+
+    } catch (error) {
+      console.error("Failed to crawl URL:", error);
+      res.status(500).json({ 
+        message: "Failed to crawl URL", 
+        error: error.message 
+      });
     }
   });
 
