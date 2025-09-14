@@ -1,6 +1,8 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { backgroundCrawler } from "./background-crawler";
+import { scaleOptimizations } from "./crawler-scale-optimizations";
 
 const app = express();
 app.use(express.json());
@@ -65,7 +67,64 @@ app.use((req, res, next) => {
     port,
     host: "0.0.0.0",
     reusePort: true,
-  }, () => {
+  }, async () => {
     log(`serving on port ${port}`);
+    
+    // Start the background crawler service after server is ready
+    try {
+      log("🚀 Initializing background crawler service...");
+      await backgroundCrawler.start();
+      log("✅ Background crawler service started successfully");
+    } catch (error) {
+      log(`❌ Failed to start background crawler: ${error instanceof Error ? error.message : String(error)}`);
+      console.error("Background crawler startup error:", error);
+    }
   });
+
+  // Graceful shutdown handling
+  const shutdown = async (signal: string) => {
+    log(`📴 Received ${signal}. Starting graceful shutdown...`);
+    
+    try {
+      // Stop background crawler
+      await backgroundCrawler.stop();
+      
+      // Flush scale optimizations
+      await scaleOptimizations.shutdown();
+      
+      // Close server
+      server.close(() => {
+        log("✅ Server closed");
+        process.exit(0);
+      });
+      
+      // Force exit if graceful shutdown takes too long
+      setTimeout(() => {
+        log("❌ Forcing exit after timeout");
+        process.exit(1);
+      }, 30000); // 30 seconds timeout
+      
+    } catch (error) {
+      log(`❌ Error during shutdown: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    }
+  };
+
+  // Handle shutdown signals
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  
+  // Handle uncaught errors
+  process.on('uncaughtException', (error) => {
+    log(`❌ Uncaught Exception: ${error.message}`);
+    console.error('Uncaught Exception:', error);
+    shutdown('uncaughtException');
+  });
+  
+  process.on('unhandledRejection', (reason, promise) => {
+    log(`❌ Unhandled Rejection at: ${promise}, reason: ${reason}`);
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    shutdown('unhandledRejection');
+  });
+
 })();

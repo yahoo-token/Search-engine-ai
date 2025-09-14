@@ -885,7 +885,7 @@ export class DatabaseStorage implements IStorage {
           title: site.title || '',
           description: site.description || '',
           category: site.category || 'general',
-          ranking: site.ranking,
+          ranking: site.ranking ?? undefined,
           source: 'crawled_sites' as const
         })));
 
@@ -894,8 +894,8 @@ export class DatabaseStorage implements IStorage {
 
       // Sort by ranking/relevance
       results.sort((a, b) => {
-        const aScore = a.rankScore || a.ranking || 0;
-        const bScore = b.rankScore || b.ranking || 0;
+        const aScore = a.rankScore ?? a.ranking ?? 0;
+        const bScore = b.rankScore ?? b.ranking ?? 0;
         return bScore - aScore;
       });
 
@@ -915,7 +915,7 @@ export class DatabaseStorage implements IStorage {
           title: site.title || '',
           description: site.description || '',
           category: site.category || 'general',
-          ranking: site.ranking,
+          ranking: site.ranking ?? undefined,
           source: 'crawled_sites' as const
         })),
         totalCount: legacyResults.totalCount
