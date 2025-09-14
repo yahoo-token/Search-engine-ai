@@ -5,6 +5,7 @@ import { setupAuth } from "./auth";
 import { generateAIResponse, categorizeSearchQuery } from "./openai";
 import { webCrawler } from "./crawler";
 import { insertSearchQuerySchema } from "@shared/schema";
+import { ZodError } from "zod";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication
@@ -13,11 +14,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Search endpoint
   app.post("/api/search", async (req, res) => {
     try {
-      const { query, category = "all" } = req.body;
-      
-      if (!query) {
-        return res.status(400).json({ message: "Query is required" });
-      }
+      // Validate input using Zod schema
+      const validatedData = insertSearchQuerySchema.parse(req.body);
+      const { query, category } = validatedData;
 
       // Auto-categorize if not specified
       const searchCategory = category === "all" ? await categorizeSearchQuery(query) : category;
@@ -67,6 +66,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
         searchTime: "0.42", // Mock search time
       });
     } catch (error) {
+      if (error instanceof ZodError) {
+        const fieldErrors = error.errors.map(err => ({
+          field: err.path.join('.'),
+          message: err.message
+        }));
+        return res.status(400).json({ 
+          message: "Validation failed",
+          errors: fieldErrors
+        });
+      }
+
       console.error("Search error:", error);
       
       // Return 200 with error information for graceful degradation

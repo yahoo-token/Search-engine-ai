@@ -5,7 +5,8 @@ import session from "express-session";
 import { scrypt, randomBytes, timingSafeEqual } from "crypto";
 import { promisify } from "util";
 import { storage } from "./storage";
-import { User as SelectUser } from "@shared/schema";
+import { User as SelectUser, insertUserSchema, loginSchema } from "@shared/schema";
+import { ZodError } from "zod";
 
 declare global {
   namespace Express {
@@ -65,31 +66,78 @@ export function setupAuth(app: Express) {
 
   app.post("/api/register", async (req, res, next) => {
     try {
-      const existingUser = await storage.getUserByUsername(req.body.username);
+      // Validate input using Zod schema
+      const validatedData = insertUserSchema.parse(req.body);
+
+      const existingUser = await storage.getUserByUsername(validatedData.username);
       if (existingUser) {
-        return res.status(400).json({ message: "Username already exists" });
+        return res.status(400).json({ 
+          message: "Username already exists",
+          field: "username"
+        });
       }
 
       const user = await storage.createUser({
-        ...req.body,
-        password: await hashPassword(req.body.password),
+        ...validatedData,
+        password: await hashPassword(validatedData.password),
       });
 
-      req.login(user, (err) => {
+      req.login(user, (err: any) => {
         if (err) return next(err);
         res.status(201).json(user);
       });
     } catch (error) {
+      if (error instanceof ZodError) {
+        const fieldErrors = error.errors.map(err => ({
+          field: err.path.join('.'),
+          message: err.message
+        }));
+        return res.status(400).json({ 
+          message: "Validation failed",
+          errors: fieldErrors
+        });
+      }
+      console.error("Registration error:", error);
       res.status(500).json({ message: "Registration failed" });
     }
   });
 
-  app.post("/api/login", passport.authenticate("local"), (req, res) => {
-    res.status(200).json(req.user);
+  app.post("/api/login", async (req, res, next) => {
+    try {
+      // Validate input using Zod schema
+      const validatedData = loginSchema.parse(req.body);
+
+      // Use passport authentication with validated data
+      passport.authenticate("local", (err: any, user: Express.User | false, info: any) => {
+        if (err) return next(err);
+        if (!user) {
+          return res.status(401).json({ 
+            message: "Invalid username or password",
+            field: "credentials"
+          });
+        }
+        req.login(user, (err: any) => {
+          if (err) return next(err);
+          res.status(200).json(user);
+        });
+      })(req, res, next);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        const fieldErrors = error.errors.map(err => ({
+          field: err.path.join('.'),
+          message: err.message
+        }));
+        return res.status(400).json({ 
+          message: "Validation failed",
+          errors: fieldErrors
+        });
+      }
+      next(error);
+    }
   });
 
   app.post("/api/logout", (req, res, next) => {
-    req.logout((err) => {
+    req.logout((err: any) => {
       if (err) return next(err);
       res.sendStatus(200);
     });

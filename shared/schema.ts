@@ -106,11 +106,42 @@ export const insertUserSchema = createInsertSchema(users).pick({
   username: true,
   password: true,
   email: true,
+}).extend({
+  username: z.string()
+    .min(3, "Username must be at least 3 characters long")
+    .max(50, "Username must be less than 50 characters")
+    .regex(/^[a-zA-Z0-9_]+$/, "Username can only contain letters, numbers, and underscores")
+    .trim(),
+  password: z.string()
+    .min(8, "Password must be at least 8 characters long")
+    .max(100, "Password must be less than 100 characters"),
+  email: z.string()
+    .email("Please enter a valid email address")
+    .optional()
+    .or(z.literal(""))
+    .transform(val => val === "" ? undefined : val),
+});
+
+export const loginSchema = z.object({
+  username: z.string()
+    .min(1, "Username is required")
+    .trim(),
+  password: z.string()
+    .min(1, "Password is required"),
 });
 
 export const insertSearchQuerySchema = createInsertSchema(searchQueries).pick({
   query: true,
   category: true,
+}).extend({
+  query: z.string()
+    .min(1, "Search query cannot be empty")
+    .max(500, "Search query must be less than 500 characters")
+    .trim(),
+  category: z.string()
+    .default("all")
+    .refine(val => ["all", "web", "news", "images", "videos", "academic", "social"].includes(val), 
+      "Invalid search category"),
 });
 
 export const insertCrawledSiteSchema = createInsertSchema(crawledSites).pick({
@@ -123,6 +154,7 @@ export const insertCrawledSiteSchema = createInsertSchema(crawledSites).pick({
 
 // Types
 export type InsertUser = z.infer<typeof insertUserSchema>;
+export type LoginUser = z.infer<typeof loginSchema>;
 export type User = typeof users.$inferSelect;
 export type InsertSearchQuery = z.infer<typeof insertSearchQuerySchema>;
 export type SearchQuery = typeof searchQueries.$inferSelect;
