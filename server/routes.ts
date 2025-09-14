@@ -228,6 +228,154 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // In-memory cache for YHT price data (60s TTL)
+  let priceCache: {
+    data: any;
+    timestamp: number;
+  } | null = null;
+
+  // Get YHT token price from external API
+  app.get("/api/yht-price", async (req, res) => {
+    // YHT token contract address on BSC - declare outside try block to avoid scope issues
+    const YHT_CONTRACT = "0x3279eF4614f241a389114C77CdD28b70fcA9537a";
+    const CACHE_TTL = 60 * 1000; // 60 seconds in milliseconds
+    
+    try {
+      
+      // Check cache first
+      const now = Date.now();
+      if (priceCache && (now - priceCache.timestamp) < CACHE_TTL) {
+        // Add Cache-Control header for browser/CDN caching
+        res.setHeader('Cache-Control', `public, max-age=60, stale-while-revalidate=30`);
+        return res.json({
+          ...priceCache.data,
+          cached: true,
+          cacheAge: Math.floor((now - priceCache.timestamp) / 1000)
+        });
+      }
+      
+      // Try CoinGecko API first (most reliable)
+      let price = null;
+      let source = "unknown";
+      let change24h = 0;
+      
+      try {
+        // CoinGecko API for YHT token price - using contract address
+        const coinGeckoController = new AbortController();
+        const coinGeckoTimeoutId = setTimeout(() => coinGeckoController.abort(), 10000);
+        
+        const coinGeckoResponse = await fetch(
+          `https://api.coingecko.com/api/v3/simple/token_price/binance-smart-chain?contract_addresses=${YHT_CONTRACT}&vs_currencies=usd&include_24hr_change=true`,
+          { 
+            headers: {
+              'Accept': 'application/json',
+              'User-Agent': 'YAS/1.0'
+            },
+            signal: coinGeckoController.signal
+          }
+        );
+        
+        clearTimeout(coinGeckoTimeoutId);
+        
+        if (coinGeckoResponse.ok) {
+          const coinGeckoData = await coinGeckoResponse.json();
+          const contractKey = YHT_CONTRACT.toLowerCase();
+          
+          if (coinGeckoData[contractKey]?.usd && coinGeckoData[contractKey].usd > 0) {
+            price = parseFloat(coinGeckoData[contractKey].usd);
+            change24h = parseFloat(coinGeckoData[contractKey].usd_24h_change || 0);
+            source = "CoinGecko";
+          }
+        }
+      } catch (error) {
+        console.warn("CoinGecko API failed:", error.message);
+      }
+      
+      // Fallback to PancakeSwap Info API  
+      if (!price) {
+        try {
+          // Get YHT token price directly from PancakeSwap Info v2 (returns USD price)
+          const yhtController = new AbortController();
+          const yhtTimeoutId = setTimeout(() => yhtController.abort(), 10000);
+          
+          const yhtResponse = await fetch(
+            `https://api.pancakeswap.info/api/v2/tokens/${YHT_CONTRACT}`,
+            {
+              headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'YAS/1.0'
+              },
+              signal: yhtController.signal
+            }
+          );
+          
+          clearTimeout(yhtTimeoutId);
+          
+          if (yhtResponse.ok) {
+            const yhtData = await yhtResponse.json();
+            const yhtPriceUsd = parseFloat(yhtData.data?.price || 0);
+            
+            // PancakeSwap Info v2 API returns USD prices directly, not BNB prices
+            if (yhtPriceUsd > 0) {
+              price = yhtPriceUsd;
+              source = "PancakeSwap";
+            }
+          }
+        } catch (error) {
+          console.warn("PancakeSwap Info API failed:", error.message);
+        }
+      }
+      
+      // Check if we got valid price data
+      if (!price || price <= 0) {
+        console.error("All price data sources failed for YHT token");
+        return res.status(502).json({
+          error: "Upstream price services unavailable",
+          message: "Unable to fetch current YHT price from external sources",
+          contractAddress: YHT_CONTRACT,
+          timestamp: new Date().toISOString(),
+          availableServices: ["CoinGecko", "PancakeSwap"],
+          retryAfter: 60
+        });
+      }
+      
+      // Use real 24h change from CoinGecko or default to 0 for other sources
+      const changePercent = parseFloat(change24h.toFixed(2));
+      
+      const responseData = {
+        price: parseFloat(price.toFixed(6)),
+        priceFormatted: `$${price.toFixed(6)}`,
+        change24h: changePercent,
+        source,
+        timestamp: new Date().toISOString(),
+        contractAddress: YHT_CONTRACT,
+        cached: false
+      };
+      
+      // Cache successful response
+      priceCache = {
+        data: responseData,
+        timestamp: now
+      };
+      
+      // Add Cache-Control header
+      res.setHeader('Cache-Control', `public, max-age=60, stale-while-revalidate=30`);
+      res.json(responseData);
+      
+    } catch (error) {
+      console.error("YHT price fetch error:", error);
+      
+      // Return proper error response with 502 status
+      res.status(502).json({
+        error: "Price service error",
+        message: "An error occurred while fetching YHT price data",
+        contractAddress: YHT_CONTRACT,
+        timestamp: new Date().toISOString(),
+        retryAfter: 60
+      });
+    }
+  });
+
   // Webmaster tools - add URL to crawl
   app.post("/api/webmaster/submit-url", async (req, res) => {
     if (!req.isAuthenticated()) {

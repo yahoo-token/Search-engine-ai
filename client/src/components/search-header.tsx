@@ -6,7 +6,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import WalletModal from "@/components/wallet-modal";
 import { useAuth } from "@/hooks/use-auth";
 import { useQuery } from "@tanstack/react-query";
-import { Search, Mic, User, LogOut } from "lucide-react";
+import { Search, Mic, User, LogOut, TrendingUp, TrendingDown } from "lucide-react";
 
 interface SearchHeaderProps {
   onSearch: (query: string) => void;
@@ -17,6 +17,18 @@ interface WalletData {
   contractAddress: string;
 }
 
+interface YHTPrice {
+  price: number;
+  priceFormatted: string;
+  change24h: number;
+  source: string;
+  timestamp: string;
+  contractAddress: string;
+  cached?: boolean;
+  cacheAge?: number;
+  error?: string;
+}
+
 export default function SearchHeader({ onSearch }: SearchHeaderProps) {
   const { user, logoutMutation } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
@@ -25,6 +37,15 @@ export default function SearchHeader({ onSearch }: SearchHeaderProps) {
   const { data: walletData } = useQuery<WalletData>({
     queryKey: ["/api/wallet/balance"],
     enabled: !!user,
+  });
+
+  // Fetch YHT price with auto-refresh every 60 seconds (matches server cache)
+  const { data: priceData, isLoading: isPriceLoading, error: priceError } = useQuery<YHTPrice>({
+    queryKey: ["/api/yht-price"],
+    refetchInterval: 60000, // Refresh every 60 seconds to match server cache
+    staleTime: 55000, // Consider stale after 55 seconds
+    retry: 2,
+    retryDelay: 1000,
   });
 
   const handleSearch = (e: React.FormEvent) => {
@@ -60,6 +81,50 @@ export default function SearchHeader({ onSearch }: SearchHeaderProps) {
                 <span className="text-xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
                   YAS
                 </span>
+              </div>
+              
+              {/* YHT Price Display */}
+              <div className="flex items-center space-x-2 px-3 py-1 bg-gradient-to-r from-primary/10 to-accent/10 rounded-full border border-primary/20" data-testid="yht-price-display">
+                {isPriceLoading ? (
+                  <div className="flex items-center space-x-2">
+                    <div className="w-2 h-2 bg-primary rounded-full animate-pulse"></div>
+                    <span className="text-sm font-mono text-muted-foreground">Loading...</span>
+                  </div>
+                ) : priceData ? (
+                  <>
+                    <span className="text-sm font-mono font-semibold text-foreground" data-testid="text-yht-price">
+                      {priceData.priceFormatted}
+                    </span>
+                    {priceData.change24h !== 0 && (
+                      <div className={`flex items-center space-x-1 ${
+                        priceData.change24h >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
+                      }`}>
+                        {priceData.change24h >= 0 ? (
+                          <TrendingUp className="w-3 h-3" />
+                        ) : (
+                          <TrendingDown className="w-3 h-3" />
+                        )}
+                        <span className="text-xs font-medium" data-testid="text-price-change">
+                          {Math.abs(priceData.change24h).toFixed(2)}%
+                        </span>
+                      </div>
+                    )}
+                    {priceData.cached && (
+                      <span className="text-xs text-blue-500 dark:text-blue-400" title="Cached data">
+                        📊
+                      </span>
+                    )}
+                  </>
+                ) : priceError ? (
+                  <div className="flex items-center space-x-2">
+                    <span className="text-sm text-red-600 dark:text-red-400">—</span>
+                    <span className="text-xs text-red-500 dark:text-red-400" title="Service unavailable">
+                      ⚠
+                    </span>
+                  </div>
+                ) : (
+                  <span className="text-sm text-muted-foreground">—</span>
+                )}
               </div>
             </div>
 

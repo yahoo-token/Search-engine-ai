@@ -11,10 +11,18 @@ import {
   decimal,
   serial,
   unique,
+  customType,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { relations } from "drizzle-orm";
+
+// Custom type for PostgreSQL tsvector columns
+const tsvector = customType<{ data: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
 
 // Session storage table for authentication
 export const sessions = pgTable(
@@ -112,8 +120,8 @@ export const pages = pgTable(
     lastFetchedAt: timestamp("last_fetched_at").defaultNow(),
     etag: text("etag"),
     lastModified: timestamp("last_modified"),
-    titleTsv: text("title_tsv"), // computed tsvector for full-text search
-    bodyTsv: text("body_tsv"), // computed tsvector for full-text search
+    titleTsv: tsvector("title_tsv"), // computed tsvector for full-text search
+    bodyTsv: tsvector("body_tsv"), // computed tsvector for full-text search
     createdAt: timestamp("created_at").defaultNow(),
     updatedAt: timestamp("updated_at").defaultNow(),
   },

@@ -22,6 +22,7 @@ export class FullTextSearchSetup {
       await this.createTextSearchConfig();
       await this.createSearchFunctions();
       await this.createTriggers();
+      await this.migrateColumnsToTsvector(); // Migrate before creating indexes
       await this.createIndexes();
       
       console.log("✅ Full-text search initialization completed successfully");
@@ -108,7 +109,7 @@ export class FullTextSearchSetup {
         category VARCHAR,
         domain_id VARCHAR,
         last_fetched_at TIMESTAMP,
-        rank_score REAL,
+        rank_score DOUBLE PRECISION,
         headline_title TEXT,
         headline_description TEXT
       ) AS $$
@@ -170,7 +171,7 @@ export class FullTextSearchSetup {
       CREATE OR REPLACE FUNCTION get_search_stats(search_query TEXT)
       RETURNS TABLE(
         total_matches BIGINT,
-        avg_rank_score REAL,
+        avg_rank_score DOUBLE PRECISION,
         top_categories JSON
       ) AS $$
       DECLARE
@@ -179,26 +180,30 @@ export class FullTextSearchSetup {
         tsquery_text := plainto_tsquery('yht_web_content', search_query);
         
         RETURN QUERY
-        SELECT 
-          COUNT(*)::BIGINT as total_matches,
-          AVG(
-            ts_rank_cd(COALESCE(p.title_tsv, to_tsvector('')), tsquery_text, 32) * 2.0 + 
-            ts_rank_cd(COALESCE(p.body_tsv, to_tsvector('')), tsquery_text, 32)
-          )::REAL as avg_rank_score,
-          json_agg(
-            json_build_object('category', category, 'count', category_count)
-            ORDER BY category_count DESC
-          ) as top_categories
-        FROM (
+        WITH search_matches AS (
           SELECT 
             p.category,
-            COUNT(*) as category_count
+            ts_rank_cd(COALESCE(p.title_tsv, to_tsvector('')), tsquery_text, 32) * 2.0 + 
+            ts_rank_cd(COALESCE(p.body_tsv, to_tsvector('')), tsquery_text, 32) as rank_score
           FROM pages p
           WHERE p.title_tsv @@ tsquery_text OR p.body_tsv @@ tsquery_text
-          GROUP BY p.category
+        ),
+        category_stats AS (
+          SELECT 
+            category,
+            COUNT(*) as category_count
+          FROM search_matches
+          GROUP BY category
+          ORDER BY category_count DESC
           LIMIT 10
-        ) category_stats, 
-        (SELECT COUNT(*) FROM pages p WHERE p.title_tsv @@ tsquery_text OR p.body_tsv @@ tsquery_text) total;
+        )
+        SELECT 
+          (SELECT COUNT(*)::BIGINT FROM search_matches) as total_matches,
+          (SELECT AVG(rank_score)::DOUBLE PRECISION FROM search_matches) as avg_rank_score,
+          (SELECT json_agg(
+            json_build_object('category', category, 'count', category_count)
+            ORDER BY category_count DESC
+          ) FROM category_stats) as top_categories;
       END;
       $$ LANGUAGE plpgsql;
     `);
@@ -248,44 +253,160 @@ export class FullTextSearchSetup {
   }
 
   /**
+   * Clean up existing problematic indexes before migration
+   */
+  private static async cleanupExistingIndexes(): Promise<void> {
+    console.log("🧹 Cleaning up existing indexes...");
+
+    try {
+      // Drop indexes that might cause conflicts
+      await db.execute(sql`
+        DO $$ 
+        BEGIN
+          -- Drop existing GIN indexes to recreate them properly
+          IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_title_tsv_gin') THEN
+            DROP INDEX idx_pages_title_tsv_gin;
+            RAISE NOTICE 'Dropped existing idx_pages_title_tsv_gin';
+          END IF;
+          
+          IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_body_tsv_gin') THEN
+            DROP INDEX idx_pages_body_tsv_gin;
+            RAISE NOTICE 'Dropped existing idx_pages_body_tsv_gin';
+          END IF;
+          
+          IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_combined_tsv_gin') THEN
+            DROP INDEX idx_pages_combined_tsv_gin;
+            RAISE NOTICE 'Dropped existing idx_pages_combined_tsv_gin';
+          END IF;
+          
+          -- Drop problematic composite index if it exists
+          IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_category_title_tsv') THEN
+            DROP INDEX idx_pages_category_title_tsv;
+            RAISE NOTICE 'Dropped problematic idx_pages_category_title_tsv';
+          END IF;
+        END $$;
+      `);
+
+      console.log("✅ Existing indexes cleaned up");
+    } catch (error) {
+      console.error("❌ Failed to cleanup existing indexes:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Migrate existing TEXT columns to TSVECTOR type safely
+   */
+  private static async migrateColumnsToTsvector(): Promise<void> {
+    console.log("🔄 Checking and migrating tsvector column types...");
+
+    try {
+      // First clean up indexes to avoid conflicts
+      await this.cleanupExistingIndexes();
+
+      // Check current column types
+      const columnInfo = await db.execute(sql`
+        SELECT column_name, data_type 
+        FROM information_schema.columns 
+        WHERE table_name = 'pages' 
+        AND column_name IN ('title_tsv', 'body_tsv');
+      `);
+
+      const columns = columnInfo.rows || [];
+      
+      for (const column of columns) {
+        if (column.data_type === 'text') {
+          console.log(`🔧 Converting ${column.column_name} from TEXT to TSVECTOR...`);
+          
+          if (column.column_name === 'title_tsv') {
+            await db.execute(sql`
+              ALTER TABLE pages 
+              ALTER COLUMN title_tsv TYPE tsvector 
+              USING CASE 
+                WHEN title_tsv IS NULL OR title_tsv = '' THEN NULL::tsvector
+                ELSE generate_title_tsvector(title)
+              END;
+            `);
+          } else if (column.column_name === 'body_tsv') {
+            await db.execute(sql`
+              ALTER TABLE pages 
+              ALTER COLUMN body_tsv TYPE tsvector 
+              USING CASE 
+                WHEN body_tsv IS NULL OR body_tsv = '' THEN NULL::tsvector
+                ELSE generate_body_tsvector(
+                  description,
+                  text_content,
+                  COALESCE((meta->>'headings')::TEXT, ''),
+                  COALESCE((meta->>'keywords')::TEXT, '')
+                )
+              END;
+            `);
+          }
+          
+          console.log(`✅ Successfully converted ${column.column_name} to TSVECTOR`);
+        } else {
+          console.log(`✓ Column ${column.column_name} is already TSVECTOR type`);
+        }
+      }
+
+      console.log("✅ Column type migration completed");
+    } catch (error) {
+      console.error("❌ Failed to migrate column types:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Create GIN indexes for optimal full-text search performance
    */
   private static async createIndexes(): Promise<void> {
     console.log("📊 Creating GIN indexes for tsvector columns...");
 
-    // Create GIN indexes on tsvector columns
-    await db.execute(sql`
-      DO $$ 
-      BEGIN
-        -- Create GIN index on title_tsv if it doesn't exist
-        IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_title_tsv_gin') THEN
-          CREATE INDEX idx_pages_title_tsv_gin ON pages USING GIN(title_tsv);
-        END IF;
-        
-        -- Create GIN index on body_tsv if it doesn't exist
-        IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_body_tsv_gin') THEN
-          CREATE INDEX idx_pages_body_tsv_gin ON pages USING GIN(body_tsv);
-        END IF;
-        
-        -- Create combined GIN index for multi-column search
-        IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_combined_tsv_gin') THEN
-          CREATE INDEX idx_pages_combined_tsv_gin ON pages USING GIN((title_tsv || body_tsv));
-        END IF;
-        
-        -- Create index on category for filtered searches
-        IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_category') THEN
-          CREATE INDEX idx_pages_category ON pages(category) WHERE category IS NOT NULL;
-        END IF;
-        
-        -- Create composite index for category + tsvector searches
-        IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_category_title_tsv') THEN
-          CREATE INDEX idx_pages_category_title_tsv ON pages USING GIN(category, title_tsv) 
-          WHERE category IS NOT NULL;
-        END IF;
-      END $$;
-    `);
-
-    console.log("✅ GIN indexes created successfully");
+    try {
+      // Create GIN indexes with IF NOT EXISTS pattern for idempotency
+      await db.execute(sql`
+        DO $$ 
+        BEGIN
+          -- Create GIN index on title_tsv if it doesn't exist
+          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_title_tsv_gin') THEN
+            CREATE INDEX idx_pages_title_tsv_gin ON pages USING GIN(title_tsv);
+            RAISE NOTICE 'Created idx_pages_title_tsv_gin';
+          ELSE
+            RAISE NOTICE 'Index idx_pages_title_tsv_gin already exists';
+          END IF;
+          
+          -- Create GIN index on body_tsv if it doesn't exist
+          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_body_tsv_gin') THEN
+            CREATE INDEX idx_pages_body_tsv_gin ON pages USING GIN(body_tsv);
+            RAISE NOTICE 'Created idx_pages_body_tsv_gin';
+          ELSE
+            RAISE NOTICE 'Index idx_pages_body_tsv_gin already exists';
+          END IF;
+          
+          -- Create combined GIN index if it doesn't exist
+          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_combined_tsv_gin') THEN
+            CREATE INDEX idx_pages_combined_tsv_gin ON pages USING GIN((title_tsv || body_tsv));
+            RAISE NOTICE 'Created idx_pages_combined_tsv_gin';
+          ELSE
+            RAISE NOTICE 'Index idx_pages_combined_tsv_gin already exists';
+          END IF;
+          
+          -- Create btree index on category if it doesn't exist
+          IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pages_category') THEN
+            CREATE INDEX idx_pages_category ON pages(category) WHERE category IS NOT NULL;
+            RAISE NOTICE 'Created idx_pages_category';
+          ELSE
+            RAISE NOTICE 'Index idx_pages_category already exists';
+          END IF;
+        END $$;
+      `);
+      
+      console.log("✅ All GIN indexes verified/created successfully");
+      
+    } catch (error) {
+      console.error("❌ Failed to create indexes:", error);
+      throw error;
+    }
   }
 
   /**
