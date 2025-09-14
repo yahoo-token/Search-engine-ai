@@ -287,6 +287,19 @@ export const insertSearchQuerySchema = createInsertSchema(searchQueries).pick({
     .default("all")
     .refine(val => ["all", "shopping", "companies", "news", "saas", "cloud", "web3"].includes(val), 
       "Invalid search category"),
+  page: z.number().min(1).default(1).optional(),
+  limit: z.number().min(1).max(100).default(20).optional(),
+});
+
+// Schema for popular results requests
+export const getPopularResultsSchema = z.object({
+  category: z.string()
+    .default("all")
+    .refine(val => ["all", "shopping", "companies", "news", "saas", "cloud", "web3"].includes(val), 
+      "Invalid search category")
+    .optional(),
+  page: z.number().min(1).default(1).optional(),
+  limit: z.number().min(1).max(100).default(20).optional(),
 });
 
 export const insertCrawledSiteSchema = createInsertSchema(crawledSites).pick({
@@ -302,6 +315,7 @@ export const insertDomainSchema = createInsertSchema(domains).pick({
   domain: true,
   status: true,
   robotsTxt: true,
+  robotsFetchedAt: true,
   sitemapUrls: true,
   crawlDelayMs: true,
   priority: true,

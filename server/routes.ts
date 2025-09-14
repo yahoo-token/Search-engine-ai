@@ -10,6 +10,7 @@ import { DatabaseInitializer } from "./database-init";
 import { ContentIndexer } from "./content-indexing";
 import { 
   insertSearchQuerySchema, 
+  getPopularResultsSchema,
   insertDomainSchema, 
   insertCrawlQueueSchema,
   type Domain,
@@ -25,25 +26,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication
   setupAuth(app);
 
-  // Search endpoint
+  // Search endpoint with pagination support
   app.post("/api/search", async (req, res) => {
     try {
       // Validate input using Zod schema
       const validatedData = insertSearchQuerySchema.parse(req.body);
-      const { query, category } = validatedData;
+      const { query, category, page = 1, limit = 20 } = validatedData;
+
+      // Calculate offset for pagination
+      const offset = (page - 1) * limit;
 
       // Auto-categorize if not specified
       const searchCategory = category === "all" ? await categorizeSearchQuery(query) : category;
 
       // Use hybrid search combining full-text search and legacy data
-      const searchResults = await storage.searchContent(query, searchCategory, {
-        limit: 20,
+      const searchData = await storage.searchContent(query, searchCategory, {
+        limit,
+        offset,
         includeRanking: true,
         useFullText: true
       });
 
       // Generate AI response
-      const aiResponse = await generateAIResponse(query, searchResults);
+      const aiResponse = await generateAIResponse(query, searchData.results);
 
       // Calculate YHT tokens earned (base 5 tokens for quality search)
       const tokensEarned = "5.0";
@@ -74,14 +79,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
         await storage.updateUserBalance(req.user.id, newBalance);
       }
 
+      // Calculate pagination metadata
+      const totalPages = Math.ceil(searchData.totalCount / limit);
+      const hasNextPage = page < totalPages;
+      const hasPrevPage = page > 1;
+
       res.json({
         query,
         category: searchCategory,
-        results: searchResults,
+        results: searchData.results,
         aiResponse,
         tokensEarned: req.isAuthenticated() ? tokensEarned : "0",
-        totalResults: searchResults.length,
+        totalResults: searchData.totalCount,
+        currentPage: page,
+        totalPages,
+        hasNextPage,
+        hasPrevPage,
         searchTime: "0.42", // Mock search time
+        searchStats: searchData.searchStats,
       });
     } catch (error) {
       if (error instanceof ZodError) {
@@ -111,7 +126,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
         tokensEarned: "0",
         totalResults: 0,
         searchTime: "0.00",
+        currentPage: req.body.page || 1,
+        totalPages: 0,
+        hasNextPage: false,
+        hasPrevPage: false,
         error: "Search service temporarily unavailable"
+      });
+    }
+  });
+
+  // Popular results endpoint for homepage default content
+  app.get("/api/search/popular", async (req, res) => {
+    try {
+      // Parse query parameters with validation
+      const { category = "all", page = 1, limit = 20 } = getPopularResultsSchema.parse({
+        category: req.query.category,
+        page: req.query.page ? parseInt(req.query.page as string) : 1,
+        limit: req.query.limit ? parseInt(req.query.limit as string) : 20,
+      });
+
+      // Get popular results from storage
+      const popularData = await storage.getPopularResults({
+        category: category === "all" ? undefined : category,
+        limit
+      });
+
+      // Calculate pagination metadata
+      const totalPages = Math.ceil(popularData.totalCount / limit);
+      const hasNextPage = page < totalPages;
+      const hasPrevPage = page > 1;
+
+      res.json({
+        category,
+        results: popularData.results,
+        totalResults: popularData.totalCount,
+        currentPage: page,
+        totalPages,
+        hasNextPage,
+        hasPrevPage,
+        isPopular: true
+      });
+    } catch (error) {
+      if (error instanceof ZodError) {
+        const fieldErrors = error.errors.map(err => ({
+          field: err.path.join('.'),
+          message: err.message
+        }));
+        return res.status(400).json({ 
+          message: "Validation failed",
+          errors: fieldErrors
+        });
+      }
+
+      console.error("Popular results error:", error);
+      res.status(500).json({
+        message: "Failed to fetch popular results",
+        results: [],
+        totalResults: 0,
+        currentPage: 1,
+        totalPages: 0,
+        hasNextPage: false,
+        hasPrevPage: false,
+        isPopular: true
       });
     }
   });

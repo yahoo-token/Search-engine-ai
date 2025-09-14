@@ -2,7 +2,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ExternalLink, Star, Users, Calendar } from "lucide-react";
+import { ExternalLink, Star, Users, Calendar, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface SearchResult {
   id: string;
@@ -15,10 +15,16 @@ interface SearchResult {
 
 interface SearchResultsProps {
   results: SearchResult[];
-  query: string;
+  query?: string;
   totalResults: number;
-  searchTime: string;
+  searchTime?: string;
   isLoading: boolean;
+  currentPage?: number;
+  totalPages?: number;
+  hasNextPage?: boolean;
+  hasPrevPage?: boolean;
+  isPopular?: boolean;
+  onPageChange?: (page: number) => void;
 }
 
 export default function SearchResults({ 
@@ -26,7 +32,13 @@ export default function SearchResults({
   query, 
   totalResults, 
   searchTime, 
-  isLoading 
+  isLoading,
+  currentPage = 1,
+  totalPages = 1,
+  hasNextPage = false,
+  hasPrevPage = false,
+  isPopular = false,
+  onPageChange
 }: SearchResultsProps) {
   if (isLoading) {
     return (
@@ -75,7 +87,11 @@ export default function SearchResults({
     <div className="flex-1 lg:w-3/5">
       {/* Results Info */}
       <div className="mb-4 text-sm text-muted-foreground" data-testid="text-results-info">
-        About {formatNumber(totalResults)} results ({searchTime} seconds) for "{query}"
+        {isPopular ? (
+          `Showing popular results (${formatNumber(totalResults)} total)`
+        ) : (
+          `About ${formatNumber(totalResults)} results (${searchTime} seconds) for "${query}"`
+        )}
       </div>
 
       {/* Search Results */}
@@ -117,9 +133,14 @@ export default function SearchResults({
                           {result.category}
                         </Badge>
                       )}
-                      {index === 0 && (
+                      {(index === 0 && !isPopular) && (
                         <Badge className="bg-web3 text-web3-foreground">
                           Featured
+                        </Badge>
+                      )}
+                      {isPopular && index < 3 && (
+                        <Badge className="bg-yellow-100 text-yellow-800">
+                          Popular
                         </Badge>
                       )}
                     </div>
@@ -144,7 +165,7 @@ export default function SearchResults({
                     </p>
 
                     {/* Additional metadata for featured results */}
-                    {index === 0 && (
+                    {(index === 0 && !isPopular) && (
                       <div className="flex items-center space-x-4 text-sm text-muted-foreground">
                         <span className="flex items-center space-x-1">
                           <Star className="w-4 h-4 text-yellow-500" />
@@ -167,16 +188,67 @@ export default function SearchResults({
           ))
         )}
 
-        {/* Load More Results */}
-        {results.length > 0 && (
-          <div className="text-center py-6">
-            <Button 
-              variant="outline" 
-              className="px-6 py-3"
-              data-testid="button-load-more"
-            >
-              Load More Results
-            </Button>
+        {/* Pagination Controls */}
+        {results.length > 0 && totalPages > 1 && (
+          <div className="flex flex-col sm:flex-row items-center justify-between py-6 border-t border-border">
+            <div className="text-sm text-muted-foreground mb-4 sm:mb-0">
+              Page {currentPage} of {totalPages}
+            </div>
+            
+            <div className="flex items-center space-x-2">
+              <Button 
+                variant="outline" 
+                size="sm"
+                disabled={!hasPrevPage}
+                onClick={() => onPageChange && onPageChange(currentPage - 1)}
+                className="flex items-center space-x-2"
+                data-testid="button-prev-page"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                <span>Previous</span>
+              </Button>
+              
+              {/* Page Numbers */}
+              <div className="flex items-center space-x-1">
+                {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                  let pageNum;
+                  if (totalPages <= 5) {
+                    pageNum = i + 1;
+                  } else if (currentPage <= 3) {
+                    pageNum = i + 1;
+                  } else if (currentPage >= totalPages - 2) {
+                    pageNum = totalPages - 4 + i;
+                  } else {
+                    pageNum = currentPage - 2 + i;
+                  }
+                  
+                  return (
+                    <Button
+                      key={pageNum}
+                      variant={pageNum === currentPage ? "default" : "outline"}
+                      size="sm"
+                      className="w-8 h-8 p-0"
+                      onClick={() => onPageChange && onPageChange(pageNum)}
+                      data-testid={`button-page-${pageNum}`}
+                    >
+                      {pageNum}
+                    </Button>
+                  );
+                })}
+              </div>
+              
+              <Button 
+                variant="outline" 
+                size="sm"
+                disabled={!hasNextPage}
+                onClick={() => onPageChange && onPageChange(currentPage + 1)}
+                className="flex items-center space-x-2"
+                data-testid="button-next-page"
+              >
+                <span>Next</span>
+                <ChevronRight className="w-4 h-4" />
+              </Button>
+            </div>
           </div>
         )}
       </div>

@@ -21,6 +21,19 @@ export interface ExtractedContent {
   mainContent: string;
   summary: string;
   wordCount: number;
+  // Enhanced branding and visual elements
+  favicon?: string;
+  logo?: string;
+  ogImage?: string;
+  twitterImage?: string;
+  appleTouchIcon?: string;
+  siteName?: string;
+  authorName?: string;
+  publishedDate?: string;
+  modifiedDate?: string;
+  canonicalUrl?: string;
+  themeColor?: string;
+  brandColors: string[];
 }
 
 export interface ContentCategorization {
@@ -76,6 +89,20 @@ export class ContentExtractor {
     const lang = this.extractLanguage($);
     const meta = this.extractMetadata($);
 
+    // Extract enhanced branding elements
+    const favicon = this.extractFavicon($, url);
+    const logo = this.extractLogo($, url);
+    const ogImage = this.extractOpenGraphImage($, url);
+    const twitterImage = this.extractTwitterImage($, url);
+    const appleTouchIcon = this.extractAppleTouchIcon($, url);
+    const siteName = this.extractSiteName($);
+    const authorName = this.extractAuthor($);
+    const publishedDate = this.extractPublishedDate($);
+    const modifiedDate = this.extractModifiedDate($);
+    const canonicalUrl = this.extractCanonicalUrl($, url);
+    const themeColor = this.extractThemeColor($);
+    const brandColors = this.extractBrandColors($);
+
     // Extract links and images
     const links = this.extractLinks($, url);
     const images = this.extractImages($, url);
@@ -104,7 +131,19 @@ export class ContentExtractor {
       headings,
       mainContent,
       summary,
-      wordCount
+      wordCount,
+      favicon,
+      logo,
+      ogImage,
+      twitterImage,
+      appleTouchIcon,
+      siteName,
+      authorName,
+      publishedDate,
+      modifiedDate,
+      canonicalUrl,
+      themeColor,
+      brandColors
     };
   }
 
@@ -204,9 +243,28 @@ export class ContentExtractor {
   private static extractImages($: cheerio.CheerioAPI, baseUrl: string): string[] {
     const images: string[] = [];
 
+    // Prioritize larger, meaningful images
     $('img[src]').each((_, element) => {
-      const src = $(element).attr('src');
+      const $img = $(element);
+      const src = $img.attr('src');
+      const alt = $img.attr('alt') || '';
+      const width = parseInt($img.attr('width') || '0');
+      const height = parseInt($img.attr('height') || '0');
+      
       if (src && !src.startsWith('data:')) {
+        // Skip very small images (likely icons or tracking pixels)
+        if ((width > 0 && width < 50) || (height > 0 && height < 50)) {
+          return;
+        }
+        
+        // Skip obvious tracking or advertisement images
+        if (alt.toLowerCase().includes('tracking') || 
+            alt.toLowerCase().includes('pixel') ||
+            src.includes('googleadservices') ||
+            src.includes('doubleclick')) {
+          return;
+        }
+
         try {
           const absoluteUrl = new URL(src, baseUrl).toString();
           if (!images.includes(absoluteUrl)) {
@@ -218,7 +276,7 @@ export class ContentExtractor {
       }
     });
 
-    return images.slice(0, 20); // Limit images
+    return images.slice(0, 10); // Limit to most relevant images
   }
 
   private static extractHeadings($: cheerio.CheerioAPI): string[] {
@@ -287,6 +345,216 @@ export class ContentExtractor {
   private static generateContentHash(content: string): string {
     return createHash('sha256').update(content).digest('hex');
   }
+
+  /**
+   * Extract favicon URL
+   */
+  private static extractFavicon($: cheerio.CheerioAPI, baseUrl: string): string | undefined {
+    // Try multiple favicon sources in order of preference
+    const selectors = [
+      'link[rel="icon"][href]',
+      'link[rel="shortcut icon"][href]',
+      'link[rel="apple-touch-icon"][href]',
+      'link[rel="icon"][type="image/x-icon"][href]'
+    ];
+
+    for (const selector of selectors) {
+      const href = $(selector).first().attr('href');
+      if (href) {
+        try {
+          return new URL(href, baseUrl).toString();
+        } catch (e) {
+          // Continue to next selector
+        }
+      }
+    }
+
+    // Fallback to default favicon location
+    try {
+      return new URL('/favicon.ico', baseUrl).toString();
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  /**
+   * Extract company/website logo
+   */
+  private static extractLogo($: cheerio.CheerioAPI, baseUrl: string): string | undefined {
+    // Try multiple logo detection strategies
+    const logoSelectors = [
+      'img[alt*="logo" i]',
+      'img[class*="logo" i]',
+      'img[id*="logo" i]',
+      '.logo img',
+      '.header img',
+      '.navbar img',
+      'header img',
+      '[class*="brand"] img',
+      '[id*="brand"] img'
+    ];
+
+    for (const selector of logoSelectors) {
+      const logoImg = $(selector).first();
+      if (logoImg.length > 0) {
+        const src = logoImg.attr('src');
+        if (src && !src.startsWith('data:')) {
+          try {
+            return new URL(src, baseUrl).toString();
+          } catch (e) {
+            // Continue to next selector
+          }
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Extract Open Graph image
+   */
+  private static extractOpenGraphImage($: cheerio.CheerioAPI, baseUrl: string): string | undefined {
+    const ogImage = $('meta[property="og:image"]').attr('content') ||
+                   $('meta[property="og:image:url"]').attr('content');
+    
+    if (ogImage) {
+      try {
+        return new URL(ogImage, baseUrl).toString();
+      } catch (e) {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Extract Twitter image
+   */
+  private static extractTwitterImage($: cheerio.CheerioAPI, baseUrl: string): string | undefined {
+    const twitterImage = $('meta[name="twitter:image"]').attr('content') ||
+                        $('meta[name="twitter:image:src"]').attr('content');
+    
+    if (twitterImage) {
+      try {
+        return new URL(twitterImage, baseUrl).toString();
+      } catch (e) {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Extract Apple Touch Icon
+   */
+  private static extractAppleTouchIcon($: cheerio.CheerioAPI, baseUrl: string): string | undefined {
+    const appleTouchIcon = $('link[rel="apple-touch-icon"]').attr('href');
+    
+    if (appleTouchIcon) {
+      try {
+        return new URL(appleTouchIcon, baseUrl).toString();
+      } catch (e) {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Extract site name
+   */
+  private static extractSiteName($: cheerio.CheerioAPI): string | undefined {
+    return $('meta[property="og:site_name"]').attr('content') ||
+           $('meta[name="application-name"]').attr('content') ||
+           $('meta[name="apple-mobile-web-app-title"]').attr('content') ||
+           undefined;
+  }
+
+  /**
+   * Extract author information
+   */
+  private static extractAuthor($: cheerio.CheerioAPI): string | undefined {
+    return $('meta[name="author"]').attr('content') ||
+           $('meta[property="article:author"]').attr('content') ||
+           $('meta[name="twitter:creator"]').attr('content') ||
+           undefined;
+  }
+
+  /**
+   * Extract published date
+   */
+  private static extractPublishedDate($: cheerio.CheerioAPI): string | undefined {
+    return $('meta[property="article:published_time"]').attr('content') ||
+           $('meta[name="date"]').attr('content') ||
+           $('meta[name="publication_date"]').attr('content') ||
+           $('time[datetime]').first().attr('datetime') ||
+           undefined;
+  }
+
+  /**
+   * Extract modified date
+   */
+  private static extractModifiedDate($: cheerio.CheerioAPI): string | undefined {
+    return $('meta[property="article:modified_time"]').attr('content') ||
+           $('meta[name="last-modified"]').attr('content') ||
+           undefined;
+  }
+
+  /**
+   * Extract canonical URL
+   */
+  private static extractCanonicalUrl($: cheerio.CheerioAPI, baseUrl: string): string | undefined {
+    const canonical = $('link[rel="canonical"]').attr('href');
+    
+    if (canonical) {
+      try {
+        return new URL(canonical, baseUrl).toString();
+      } catch (e) {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Extract theme color
+   */
+  private static extractThemeColor($: cheerio.CheerioAPI): string | undefined {
+    return $('meta[name="theme-color"]').attr('content') ||
+           $('meta[name="msapplication-navbutton-color"]').attr('content') ||
+           $('meta[name="apple-mobile-web-app-status-bar-style"]').attr('content') ||
+           undefined;
+  }
+
+  /**
+   * Extract brand colors from CSS and meta tags
+   */
+  private static extractBrandColors($: cheerio.CheerioAPI): string[] {
+    const colors: string[] = [];
+    
+    // Extract from theme color
+    const themeColor = $('meta[name="theme-color"]').attr('content');
+    if (themeColor) {
+      colors.push(themeColor);
+    }
+
+    // Extract from CSS custom properties (if available in style tags)
+    $('style').each((_, element) => {
+      const css = $(element).html() || '';
+      const colorMatches = css.match(/--[\w-]*color[\w-]*\s*:\s*(#[0-9a-fA-F]{3,6}|rgb\([^)]+\)|hsl\([^)]+\))/g);
+      if (colorMatches) {
+        colorMatches.forEach(match => {
+          const color = match.split(':')[1]?.trim();
+          if (color && !colors.includes(color)) {
+            colors.push(color);
+          }
+        });
+      }
+    });
+
+    return colors.slice(0, 5); // Limit to 5 colors
+  }
 }
 
 /**
@@ -321,12 +589,36 @@ export class ContentCategorizer {
   };
 
   private static readonly DOMAIN_PATTERNS = {
-    shopping: ['amazon', 'ebay', 'shop', 'store', 'buy', 'mall', 'marketplace'],
-    companies: ['about', 'company', 'corp', 'inc', 'ltd', 'careers', 'jobs'],
-    news: ['news', 'press', 'media', 'times', 'post', 'herald', 'journal'],
-    saas: ['app', 'platform', 'tool', 'soft', 'tech', 'io', 'ly'],
-    cloud: ['cloud', 'aws', 'azure', 'hosting', 'server', 'infra'],
-    web3: ['crypto', 'blockchain', 'defi', 'nft', 'web3', 'dao']
+    shopping: [
+      'amazon', 'ebay', 'shopify', 'stripe', 'paypal', 'squareup', 'etsy', 
+      'walmart', 'target', 'bestbuy', 'costco', 'homedepot', 'wayfair', 
+      'overstock', 'alibaba', 'shop', 'store', 'buy', 'mall', 'marketplace'
+    ],
+    companies: [
+      'google', 'microsoft', 'apple', 'meta', 'tesla', 'netflix', 'disney',
+      'samsung', 'sony', 'intel', 'adobe', 'oracle', 'ibm', 'hp', 'nvidia',
+      'about', 'company', 'corp', 'inc', 'ltd', 'careers', 'jobs'
+    ],
+    news: [
+      'cnn', 'bbc', 'techcrunch', 'theverge', 'wired', 'reuters', 
+      'arstechnica', 'engadget', 'mashable', 'venturebeat', 'forbes', 'bloomberg',
+      'news', 'press', 'media', 'times', 'post', 'herald', 'journal'
+    ],
+    saas: [
+      'slack', 'notion', 'figma', 'zoom', 'salesforce', 'hubspot', 
+      'asana', 'trello', 'dropbox', 'atlassian',
+      'app', 'platform', 'tool', 'soft', 'tech', 'io', 'ly'
+    ],
+    cloud: [
+      'aws', 'azure', 'cloud.google', 'vercel', 'netlify', 'cloudflare',
+      'digitalocean', 'heroku', 'railway', 'render',
+      'cloud', 'hosting', 'server', 'infra'
+    ],
+    web3: [
+      'coinbase', 'binance', 'ethereum', 'opensea', 'uniswap', 'metamask',
+      'chainlink', 'polygon',
+      'crypto', 'blockchain', 'defi', 'nft', 'web3', 'dao'
+    ]
   };
 
   /**
@@ -343,9 +635,20 @@ export class ContentCategorizer {
       scores[category] = this.calculateKeywordScore(text, keywords);
     }
 
-    // Add domain scoring
+    // Add domain scoring - more specific matching
     for (const [category, patterns] of Object.entries(this.DOMAIN_PATTERNS)) {
-      const domainScore = patterns.some(pattern => domain.includes(pattern)) ? 0.3 : 0;
+      let domainScore = 0;
+      for (const pattern of patterns) {
+        if (domain.includes(pattern)) {
+          // Higher score for exact domain matches
+          if (domain === pattern + '.com' || domain === pattern + '.org' || domain === pattern + '.io') {
+            domainScore = 0.5;
+            break;
+          }
+          // Lower score for partial matches
+          domainScore = Math.max(domainScore, 0.3);
+        }
+      }
       scores[category] += domainScore;
     }
 

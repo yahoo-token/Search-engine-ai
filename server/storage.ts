@@ -46,7 +46,10 @@ export interface IStorage {
   
   // Crawled sites operations
   createCrawledSite(site: InsertCrawledSite): Promise<CrawledSite>;
-  searchCrawledSites(query: string, category?: string): Promise<CrawledSite[]>;
+  searchCrawledSites(query: string, category?: string, options?: {
+    limit?: number;
+    offset?: number;
+  }): Promise<{ results: CrawledSite[]; totalCount: number }>;
   updateSiteRanking(siteId: string, ranking: number): Promise<void>;
   
   // Token operations
@@ -109,18 +112,43 @@ export interface IStorage {
   // Hybrid search combining legacy and new systems
   searchContent(query: string, category?: string, options?: {
     limit?: number;
+    offset?: number;
     includeRanking?: boolean;
     useFullText?: boolean;
-  }): Promise<Array<{
-    id: string;
-    url: string;
-    title: string;
-    description: string;
-    category: string;
-    ranking?: number;
-    source: 'crawled_sites' | 'pages';
-    rankScore?: number;
-  }>>;
+  }): Promise<{
+    results: Array<{
+      id: string;
+      url: string;
+      title: string;
+      description: string;
+      category: string;
+      ranking?: number;
+      source: 'crawled_sites' | 'pages';
+      rankScore?: number;
+    }>;
+    totalCount: number;
+    searchStats?: {
+      avgRankScore: number;
+      topCategories: Array<{ category: string; count: number }>;
+    };
+  }>;
+
+  // Popular/default results for homepage
+  getPopularResults(options?: {
+    limit?: number;
+    category?: string;
+  }): Promise<{
+    results: Array<{
+      id: string;
+      url: string;
+      title: string;
+      description: string;
+      category: string;
+      ranking?: number;
+      source: 'crawled_sites' | 'pages';
+    }>;
+    totalCount: number;
+  }>;
 
   // Crawler queue operations
   addToCrawlQueue(item: InsertCrawlQueue): Promise<CrawlQueue>;
@@ -220,7 +248,11 @@ export class DatabaseStorage implements IStorage {
     return crawledSite;
   }
 
-  async searchCrawledSites(query: string, category?: string): Promise<CrawledSite[]> {
+  async searchCrawledSites(query: string, category?: string, options: {
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<{ results: CrawledSite[]; totalCount: number }> {
+    const { limit = 20, offset = 0 } = options;
     const conditions = [
       eq(crawledSites.isActive, true),
     ];
@@ -235,12 +267,25 @@ export class DatabaseStorage implements IStorage {
       );
     }
 
-    return await db
+    // Get total count
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(crawledSites)
+      .where(and(...conditions));
+
+    // Get paginated results
+    const results = await db
       .select()
       .from(crawledSites)
       .where(and(...conditions))
       .orderBy(desc(crawledSites.ranking))
-      .limit(20);
+      .limit(limit)
+      .offset(offset);
+
+    return {
+      results,
+      totalCount: count
+    };
   }
 
   async updateSiteRanking(siteId: string, ranking: number): Promise<void> {
@@ -758,20 +803,29 @@ export class DatabaseStorage implements IStorage {
   // Hybrid search combining legacy and new systems
   async searchContent(query: string, category?: string, options: {
     limit?: number;
+    offset?: number;
     includeRanking?: boolean;
     useFullText?: boolean;
-  } = {}): Promise<Array<{
-    id: string;
-    url: string;
-    title: string;
-    description: string;
-    category: string;
-    ranking?: number;
-    source: 'crawled_sites' | 'pages';
-    rankScore?: number;
-  }>> {
+  } = {}): Promise<{
+    results: Array<{
+      id: string;
+      url: string;
+      title: string;
+      description: string;
+      category: string;
+      ranking?: number;
+      source: 'crawled_sites' | 'pages';
+      rankScore?: number;
+    }>;
+    totalCount: number;
+    searchStats?: {
+      avgRankScore: number;
+      topCategories: Array<{ category: string; count: number }>;
+    };
+  }> {
     const {
       limit = 20,
+      offset = 0,
       includeRanking = true,
       useFullText = true
     } = options;
@@ -787,12 +841,16 @@ export class DatabaseStorage implements IStorage {
       rankScore?: number;
     }> = [];
 
+    let totalCount = 0;
+    let searchStats: { avgRankScore: number; topCategories: Array<{ category: string; count: number }>; } | undefined;
+
     try {
       // Search pages table with full-text search
       if (useFullText) {
         const pageResults = await this.searchPagesFullText(query, {
           category,
           limit: Math.ceil(limit * 0.7), // 70% from pages
+          offset: Math.floor(offset * 0.7),
           includeRanking,
           includeHeadlines: false
         });
@@ -806,14 +864,133 @@ export class DatabaseStorage implements IStorage {
           source: 'pages' as const,
           rankScore: page.rankScore
         })));
+
+        totalCount += pageResults.totalCount;
+        searchStats = pageResults.searchStats;
       }
 
       // Search legacy crawled_sites table for remaining slots
       const remainingLimit = limit - results.length;
+      const remainingOffset = Math.max(0, offset - results.length);
+      
       if (remainingLimit > 0) {
-        const legacyResults = await this.searchCrawledSites(query, category);
+        const legacyResults = await this.searchCrawledSites(query, category, {
+          limit: remainingLimit,
+          offset: remainingOffset
+        });
         
-        results.push(...legacyResults.slice(0, remainingLimit).map(site => ({
+        results.push(...legacyResults.results.map(site => ({
+          id: site.id,
+          url: site.url,
+          title: site.title || '',
+          description: site.description || '',
+          category: site.category || 'general',
+          ranking: site.ranking,
+          source: 'crawled_sites' as const
+        })));
+
+        totalCount += legacyResults.totalCount;
+      }
+
+      // Sort by ranking/relevance
+      results.sort((a, b) => {
+        const aScore = a.rankScore || a.ranking || 0;
+        const bScore = b.rankScore || b.ranking || 0;
+        return bScore - aScore;
+      });
+
+      return {
+        results: results.slice(0, limit),
+        totalCount,
+        searchStats
+      };
+    } catch (error) {
+      console.error('Hybrid search failed:', error);
+      // Fallback to legacy search
+      const legacyResults = await this.searchCrawledSites(query, category, { limit, offset });
+      return {
+        results: legacyResults.results.map(site => ({
+          id: site.id,
+          url: site.url,
+          title: site.title || '',
+          description: site.description || '',
+          category: site.category || 'general',
+          ranking: site.ranking,
+          source: 'crawled_sites' as const
+        })),
+        totalCount: legacyResults.totalCount
+      };
+    }
+  }
+
+  // Popular/default results for homepage
+  async getPopularResults(options: {
+    limit?: number;
+    category?: string;
+  } = {}): Promise<{
+    results: Array<{
+      id: string;
+      url: string;
+      title: string;
+      description: string;
+      category: string;
+      ranking?: number;
+      source: 'crawled_sites' | 'pages';
+    }>;
+    totalCount: number;
+  }> {
+    const { limit = 20, category } = options;
+
+    try {
+      // Get popular pages from both sources, prioritizing higher ranked content
+      const results: Array<{
+        id: string;
+        url: string;
+        title: string;
+        description: string;
+        category: string;
+        ranking?: number;
+        source: 'crawled_sites' | 'pages';
+      }> = [];
+
+      // Get top pages from pages table (based on recent activity and content)
+      const pageConditions = [];
+      if (category && category !== 'all') {
+        pageConditions.push(eq(pages.category, category));
+      }
+
+      const topPages = await db
+        .select()
+        .from(pages)
+        .where(pageConditions.length > 0 ? and(...pageConditions) : undefined)
+        .orderBy(desc(pages.lastFetchedAt), desc(pages.createdAt))
+        .limit(Math.ceil(limit * 0.6)); // 60% from pages
+
+      results.push(...topPages.map(page => ({
+        id: page.id,
+        url: page.url,
+        title: page.title || '',
+        description: page.description || '',
+        category: page.category || 'general',
+        source: 'pages' as const
+      })));
+
+      // Get popular crawled sites for remaining slots
+      const remainingLimit = limit - results.length;
+      if (remainingLimit > 0) {
+        const siteConditions = [eq(crawledSites.isActive, true)];
+        if (category && category !== 'all') {
+          siteConditions.push(eq(crawledSites.category, category));
+        }
+
+        const topSites = await db
+          .select()
+          .from(crawledSites)
+          .where(and(...siteConditions))
+          .orderBy(desc(crawledSites.ranking), desc(crawledSites.lastCrawled))
+          .limit(remainingLimit);
+
+        results.push(...topSites.map(site => ({
           id: site.id,
           url: site.url,
           title: site.title || '',
@@ -824,27 +1001,56 @@ export class DatabaseStorage implements IStorage {
         })));
       }
 
-      // Sort by ranking/relevance
-      results.sort((a, b) => {
-        const aScore = a.rankScore || a.ranking || 0;
-        const bScore = b.rankScore || b.ranking || 0;
-        return bScore - aScore;
-      });
+      // Get total count for pagination
+      const totalPagesCount = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(pages)
+        .where(pageConditions.length > 0 ? and(...pageConditions) : undefined);
 
-      return results.slice(0, limit);
+      const totalSitesCount = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(crawledSites)
+        .where(and(...(category && category !== 'all' ? [eq(crawledSites.category, category), eq(crawledSites.isActive, true)] : [eq(crawledSites.isActive, true)])));
+
+      const totalCount = (totalPagesCount[0]?.count || 0) + (totalSitesCount[0]?.count || 0);
+
+      return {
+        results: results.slice(0, limit),
+        totalCount
+      };
+
     } catch (error) {
-      console.error('Hybrid search failed:', error);
-      // Fallback to legacy search
-      const legacyResults = await this.searchCrawledSites(query, category);
-      return legacyResults.map(site => ({
-        id: site.id,
-        url: site.url,
-        title: site.title || '',
-        description: site.description || '',
-        category: site.category || 'general',
-        ranking: site.ranking,
-        source: 'crawled_sites' as const
-      }));
+      console.error('Failed to get popular results:', error);
+      // Fallback to crawled sites only
+      const conditions = [eq(crawledSites.isActive, true)];
+      if (category && category !== 'all') {
+        conditions.push(eq(crawledSites.category, category));
+      }
+
+      const fallbackResults = await db
+        .select()
+        .from(crawledSites)
+        .where(and(...conditions))
+        .orderBy(desc(crawledSites.ranking))
+        .limit(limit);
+
+      const totalCount = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(crawledSites)
+        .where(and(...conditions));
+
+      return {
+        results: fallbackResults.map(site => ({
+          id: site.id,
+          url: site.url,
+          title: site.title || '',
+          description: site.description || '',
+          category: site.category || 'general',
+          ranking: site.ranking,
+          source: 'crawled_sites' as const
+        })),
+        totalCount: totalCount[0]?.count || 0
+      };
     }
   }
 }

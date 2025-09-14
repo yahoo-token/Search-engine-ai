@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import SearchHeader from "@/components/search-header.tsx";
 import SearchTabs from "@/components/search-tabs.tsx";
 import SearchResults from "@/components/search-results.tsx";
@@ -31,7 +31,26 @@ interface SearchResponse {
   aiResponse: AISearchResponse;
   tokensEarned: string;
   totalResults: number;
+  currentPage: number;
+  totalPages: number;
+  hasNextPage: boolean;
+  hasPrevPage: boolean;
   searchTime: string;
+  searchStats?: {
+    avgRankScore: number;
+    topCategories: Array<{ category: string; count: number }>;
+  };
+}
+
+interface PopularResponse {
+  category: string;
+  results: SearchResult[];
+  totalResults: number;
+  currentPage: number;
+  totalPages: number;
+  hasNextPage: boolean;
+  hasPrevPage: boolean;
+  isPopular: true;
 }
 
 export default function HomePage() {
@@ -39,15 +58,25 @@ export default function HomePage() {
   const { toast } = useToast();
   const [searchQuery, setSearchQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("all");
+  const [currentPage, setCurrentPage] = useState(1);
   const [searchResults, setSearchResults] = useState<SearchResponse | null>(null);
+  const [showingPopular, setShowingPopular] = useState(true);
+
+  // Fetch popular results on page load
+  const { data: popularResults, isLoading: popularLoading } = useQuery<PopularResponse>({
+    queryKey: ["/api/search/popular", activeCategory, currentPage],
+    enabled: showingPopular,
+    refetchOnWindowFocus: false,
+  });
 
   const searchMutation = useMutation({
-    mutationFn: async (data: { query: string; category: string }) => {
+    mutationFn: async (data: { query: string; category: string; page: number }) => {
       const res = await apiRequest("POST", "/api/search", data);
       return await res.json();
     },
     onSuccess: (data: SearchResponse) => {
       setSearchResults(data);
+      setShowingPopular(false);
       if (user && parseFloat(data.tokensEarned) > 0) {
         toast({
           title: "YHT Tokens Earned!",
@@ -69,15 +98,31 @@ export default function HomePage() {
   const handleSearch = (query: string) => {
     if (!query.trim()) return;
     setSearchQuery(query);
-    searchMutation.mutate({ query: query.trim(), category: activeCategory });
+    setCurrentPage(1);
+    searchMutation.mutate({ query: query.trim(), category: activeCategory, page: 1 });
   };
 
   const handleCategoryChange = (category: string) => {
     setActiveCategory(category);
+    setCurrentPage(1);
     if (searchQuery) {
-      searchMutation.mutate({ query: searchQuery, category });
+      searchMutation.mutate({ query: searchQuery, category, page: 1 });
     }
   };
+
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page);
+    if (searchQuery && !showingPopular) {
+      searchMutation.mutate({ query: searchQuery, category: activeCategory, page });
+    }
+  };
+
+  // Update popular results when category or page changes
+  useEffect(() => {
+    if (showingPopular) {
+      queryClient.invalidateQueries({ queryKey: ["/api/search/popular", activeCategory, currentPage] });
+    }
+  }, [activeCategory, currentPage, showingPopular, queryClient]);
 
 
   return (
@@ -87,20 +132,28 @@ export default function HomePage() {
       
       <main className="pt-32 min-h-screen">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          {searchResults ? (
+          {(searchResults || popularResults) ? (
             <div className="flex flex-col lg:flex-row gap-6">
               <SearchResults
-                results={searchResults.results}
-                query={searchResults.query}
-                totalResults={searchResults.totalResults}
-                searchTime={searchResults.searchTime}
-                isLoading={searchMutation.isPending}
+                results={showingPopular ? (popularResults?.results || []) : (searchResults?.results || [])}
+                query={showingPopular ? undefined : searchResults?.query}
+                totalResults={showingPopular ? (popularResults?.totalResults || 0) : (searchResults?.totalResults || 0)}
+                searchTime={showingPopular ? undefined : searchResults?.searchTime}
+                isLoading={showingPopular ? popularLoading : searchMutation.isPending}
+                currentPage={currentPage}
+                totalPages={showingPopular ? (popularResults?.totalPages || 1) : (searchResults?.totalPages || 1)}
+                hasNextPage={showingPopular ? (popularResults?.hasNextPage || false) : (searchResults?.hasNextPage || false)}
+                hasPrevPage={showingPopular ? (popularResults?.hasPrevPage || false) : (searchResults?.hasPrevPage || false)}
+                isPopular={showingPopular}
+                onPageChange={handlePageChange}
               />
-              <AIResponse
-                response={searchResults.aiResponse}
-                tokensEarned={searchResults.tokensEarned}
-                isLoading={searchMutation.isPending}
-              />
+              {!showingPopular && searchResults && (
+                <AIResponse
+                  response={searchResults.aiResponse}
+                  tokensEarned={searchResults.tokensEarned}
+                  isLoading={searchMutation.isPending}
+                />
+              )}
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center min-h-[60vh] text-center">
@@ -115,7 +168,7 @@ export default function HomePage() {
                 }
               </p>
               <div className="text-sm text-muted-foreground">
-                Try searching for "AI companies", "Web3 platforms", or "Cloud services"
+                Search to discover websites, or browse popular results below
               </div>
             </div>
           )}
