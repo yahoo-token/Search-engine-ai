@@ -5,6 +5,7 @@ import { setupAuth } from "./auth";
 import { generateAIResponse, categorizeSearchQuery } from "./openai";
 import { webCrawler } from "./crawler";
 import { CrawlerCore } from "./crawler-core";
+import { crawlerDiscoveryIntegration, enhancedCrawler } from "./crawler-integration";
 import { 
   insertSearchQuerySchema, 
   insertDomainSchema, 
@@ -532,6 +533,193 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ 
         message: "Failed to crawl URL", 
         error: error.message 
+      });
+    }
+  });
+
+  // Page Discovery Endpoints
+  app.post("/api/discovery/discover-page", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { url, extractResources = false, respectNofollow = true } = req.body;
+      
+      if (!url) {
+        return res.status(400).json({ message: "URL is required" });
+      }
+
+      // Get or create domain
+      const urlObj = new URL(url);
+      const domainName = urlObj.hostname;
+      
+      let domain = await storage.getDomain(domainName);
+      if (!domain) {
+        domain = await storage.createDomain({
+          domain: domainName,
+          status: 'active'
+        });
+      }
+
+      // Crawl page with discovery
+      const result = await enhancedCrawler.crawlPageWithDiscovery(url, domain);
+
+      res.json({
+        message: "Page discovery completed",
+        page: result.page,
+        discovery: result.discoveryResult,
+        errors: result.errors
+      });
+
+    } catch (error) {
+      console.error("Failed to discover page:", error);
+      res.status(500).json({ 
+        message: "Failed to discover page", 
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post("/api/discovery/discover-sitemaps", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { domainId } = req.body;
+      
+      if (!domainId) {
+        return res.status(400).json({ message: "Domain ID is required" });
+      }
+
+      const domain = await storage.getDomainById(domainId);
+      if (!domain) {
+        return res.status(404).json({ message: "Domain not found" });
+      }
+
+      const result = await enhancedCrawler.discoverFromDomainSitemaps(domain);
+
+      res.json({
+        message: "Sitemap discovery completed",
+        domain: domain.domain,
+        discovery: result
+      });
+
+    } catch (error) {
+      console.error("Failed to discover sitemaps:", error);
+      res.status(500).json({ 
+        message: "Failed to discover sitemaps", 
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get("/api/discovery/stats", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { domainId } = req.query;
+      
+      if (domainId) {
+        const stats = await crawlerDiscoveryIntegration.getDomainDiscoveryStats(domainId as string);
+        res.json({
+          domain: domainId,
+          stats,
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        const globalStats = await storage.getDiscoveryStats();
+        const overallStats = crawlerDiscoveryIntegration.getOverallStats();
+        
+        res.json({
+          global: globalStats,
+          overall: overallStats,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+    } catch (error) {
+      console.error("Failed to fetch discovery stats:", error);
+      res.status(500).json({ message: "Failed to fetch discovery stats" });
+    }
+  });
+
+  app.get("/api/discovery/queue", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { reason, limit = 50 } = req.query;
+      
+      let queueItems;
+      if (reason) {
+        queueItems = await storage.getCrawlQueueByReason(reason as string, parseInt(limit as string));
+      } else {
+        queueItems = await storage.getNextCrawlItems(parseInt(limit as string));
+      }
+      
+      res.json({
+        items: queueItems,
+        count: queueItems.length,
+        filters: { reason, limit }
+      });
+
+    } catch (error) {
+      console.error("Failed to fetch discovery queue:", error);
+      res.status(500).json({ message: "Failed to fetch discovery queue" });
+    }
+  });
+
+  app.post("/api/discovery/cleanup-duplicates", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { domainId } = req.body;
+      
+      if (!domainId) {
+        return res.status(400).json({ message: "Domain ID is required" });
+      }
+
+      const removedCount = await crawlerDiscoveryIntegration.cleanupDuplicates(domainId);
+
+      res.json({
+        message: "Duplicate cleanup completed",
+        domainId,
+        removedCount
+      });
+
+    } catch (error) {
+      console.error("Failed to cleanup duplicates:", error);
+      res.status(500).json({ 
+        message: "Failed to cleanup duplicates", 
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post("/api/discovery/reset", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      crawlerDiscoveryIntegration.reset();
+      
+      res.json({
+        message: "Discovery system reset completed"
+      });
+
+    } catch (error) {
+      console.error("Failed to reset discovery system:", error);
+      res.status(500).json({ 
+        message: "Failed to reset discovery system", 
+        error: error instanceof Error ? error.message : String(error)
       });
     }
   });

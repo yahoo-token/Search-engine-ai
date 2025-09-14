@@ -100,6 +100,17 @@ export interface IStorage {
     totalBytes: number;
   }>;
 
+  // Discovery operations
+  addBatchToCrawlQueue(items: InsertCrawlQueue[]): Promise<CrawlQueue[]>;
+  getCrawlQueueByReason(reason: string, limit?: number): Promise<CrawlQueue[]>;
+  getDiscoveryStats(domainId?: string): Promise<{
+    totalQueued: number;
+    byReason: Record<string, number>;
+    avgPriority: number;
+    oldestItem: Date | null;
+  }>;
+  removeDuplicateCrawlQueueItems(domainId: string): Promise<number>;
+
   sessionStore: session.Store;
 }
 
@@ -464,6 +475,85 @@ export class DatabaseStorage implements IStorage {
       avgResponseTime: Math.round(stats?.avgResponseTime || 0),
       totalBytes: stats?.totalBytes || 0
     };
+  }
+
+  // Discovery operations
+  async addBatchToCrawlQueue(items: InsertCrawlQueue[]): Promise<CrawlQueue[]> {
+    if (items.length === 0) return [];
+    
+    return await db
+      .insert(crawlQueue)
+      .values(items)
+      .onConflictDoNothing()
+      .returning();
+  }
+
+  async getCrawlQueueByReason(reason: string, limit: number = 100): Promise<CrawlQueue[]> {
+    return await db
+      .select()
+      .from(crawlQueue)
+      .where(eq(crawlQueue.reason, reason))
+      .orderBy(desc(crawlQueue.priority), asc(crawlQueue.scheduledAt))
+      .limit(limit);
+  }
+
+  async getDiscoveryStats(domainId?: string): Promise<{
+    totalQueued: number;
+    byReason: Record<string, number>;
+    avgPriority: number;
+    oldestItem: Date | null;
+  }> {
+    const conditions = [];
+    if (domainId) {
+      conditions.push(eq(crawlQueue.domainId, domainId));
+    }
+
+    const [stats] = await db
+      .select({
+        totalQueued: sql<number>`count(*)`,
+        avgPriority: sql<number>`avg(${crawlQueue.priority})`,
+        oldestItem: sql<Date>`min(${crawlQueue.scheduledAt})`
+      })
+      .from(crawlQueue)
+      .where(conditions.length > 0 ? and(...conditions) : undefined);
+
+    // Get reason breakdown
+    const reasonStats = await db
+      .select({
+        reason: crawlQueue.reason,
+        count: sql<number>`count(*)`
+      })
+      .from(crawlQueue)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .groupBy(crawlQueue.reason);
+
+    const byReason: Record<string, number> = {};
+    reasonStats.forEach(stat => {
+      byReason[stat.reason] = stat.count;
+    });
+
+    return {
+      totalQueued: stats?.totalQueued || 0,
+      byReason,
+      avgPriority: Math.round(stats?.avgPriority || 0),
+      oldestItem: stats?.oldestItem || null
+    };
+  }
+
+  async removeDuplicateCrawlQueueItems(domainId: string): Promise<number> {
+    // Remove duplicate URLs in crawl queue for a domain, keeping the highest priority one
+    const result = await db.execute(sql`
+      DELETE FROM ${crawlQueue} 
+      WHERE ${crawlQueue.domainId} = ${domainId}
+      AND ${crawlQueue.id} NOT IN (
+        SELECT DISTINCT ON (${crawlQueue.url}) ${crawlQueue.id}
+        FROM ${crawlQueue}
+        WHERE ${crawlQueue.domainId} = ${domainId}
+        ORDER BY ${crawlQueue.url}, ${crawlQueue.priority} DESC, ${crawlQueue.scheduledAt} ASC
+      )
+    `);
+    
+    return result.rowCount || 0;
   }
 }
 
