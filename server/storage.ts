@@ -77,6 +77,51 @@ export interface IStorage {
   getPagesByDomain(domainId: string, limit?: number): Promise<Page[]>;
   searchPages(query: string, limit?: number): Promise<Page[]>;
 
+  // Full-text search operations
+  searchPagesFullText(query: string, options?: {
+    category?: string;
+    limit?: number;
+    offset?: number;
+    includeRanking?: boolean;
+    includeHeadlines?: boolean;
+  }): Promise<{
+    results: Array<Page & {
+      rankScore?: number;
+      headlineTitle?: string;
+      headlineDescription?: string;
+    }>;
+    totalCount: number;
+    searchStats?: {
+      avgRankScore: number;
+      topCategories: Array<{ category: string; count: number }>;
+    };
+  }>;
+
+  // Content indexing operations
+  indexPageContent(pageId: string, content: {
+    title: string;
+    description?: string;
+    textContent?: string;
+    category?: string;
+    meta?: Record<string, any>;
+  }): Promise<void>;
+
+  // Hybrid search combining legacy and new systems
+  searchContent(query: string, category?: string, options?: {
+    limit?: number;
+    includeRanking?: boolean;
+    useFullText?: boolean;
+  }): Promise<Array<{
+    id: string;
+    url: string;
+    title: string;
+    description: string;
+    category: string;
+    ranking?: number;
+    source: 'crawled_sites' | 'pages';
+    rankScore?: number;
+  }>>;
+
   // Crawler queue operations
   addToCrawlQueue(item: InsertCrawlQueue): Promise<CrawlQueue>;
   getNextCrawlItems(limit?: number): Promise<CrawlQueue[]>;
@@ -554,6 +599,253 @@ export class DatabaseStorage implements IStorage {
     `);
     
     return result.rowCount || 0;
+  }
+
+  // Full-text search operations
+  async searchPagesFullText(query: string, options: {
+    category?: string;
+    limit?: number;
+    offset?: number;
+    includeRanking?: boolean;
+    includeHeadlines?: boolean;
+  } = {}): Promise<{
+    results: Array<Page & {
+      rankScore?: number;
+      headlineTitle?: string;
+      headlineDescription?: string;
+    }>;
+    totalCount: number;
+    searchStats?: {
+      avgRankScore: number;
+      topCategories: Array<{ category: string; count: number }>;
+    };
+  }> {
+    const {
+      category,
+      limit = 20,
+      offset = 0,
+      includeRanking = true,
+      includeHeadlines = true
+    } = options;
+
+    if (!query || query.trim().length === 0) {
+      return { results: [], totalCount: 0 };
+    }
+
+    try {
+      // Use the PostgreSQL search function we created
+      const searchResults = await db.execute(sql`
+        SELECT * FROM search_pages_with_ranking(
+          ${query},
+          ${category || null},
+          ${limit},
+          ${offset}
+        );
+      `);
+
+      const results = (searchResults.rows || []).map((row: any) => ({
+        id: row.id,
+        domainId: row.domain_id,
+        url: row.url,
+        httpStatus: null,
+        contentHash: null,
+        title: row.title,
+        description: row.description,
+        textContent: null,
+        meta: {},
+        lang: null,
+        category: row.category,
+        lastFetchedAt: row.last_fetched_at,
+        etag: null,
+        lastModified: null,
+        titleTsv: null,
+        bodyTsv: null,
+        createdAt: null,
+        updatedAt: null,
+        ...(includeRanking && { rankScore: row.rank_score }),
+        ...(includeHeadlines && {
+          headlineTitle: row.headline_title,
+          headlineDescription: row.headline_description
+        })
+      }));
+
+      // Get total count
+      const countResult = await db.execute(sql`
+        SELECT COUNT(*) as total
+        FROM pages p
+        WHERE (
+          p.title_tsv @@ plainto_tsquery('yht_web_content', ${query}) OR 
+          p.body_tsv @@ plainto_tsquery('yht_web_content', ${query})
+        )
+        ${category && category !== 'all' ? sql`AND p.category = ${category}` : sql``}
+      `);
+
+      const totalCount = countResult.rows?.[0]?.total || 0;
+
+      // Get search stats if requested
+      let searchStats;
+      if (includeRanking) {
+        try {
+          const statsResult = await db.execute(sql`
+            SELECT * FROM get_search_stats(${query});
+          `);
+          
+          if (statsResult.rows?.[0]) {
+            const statsRow = statsResult.rows[0];
+            searchStats = {
+              avgRankScore: statsRow.avg_rank_score || 0,
+              topCategories: statsRow.top_categories || []
+            };
+          }
+        } catch (error) {
+          console.warn('Failed to get search stats:', error);
+        }
+      }
+
+      return {
+        results,
+        totalCount: Number(totalCount),
+        searchStats
+      };
+    } catch (error) {
+      console.error('Full-text search failed:', error);
+      return { results: [], totalCount: 0 };
+    }
+  }
+
+  // Content indexing operations
+  async indexPageContent(pageId: string, content: {
+    title: string;
+    description?: string;
+    textContent?: string;
+    category?: string;
+    meta?: Record<string, any>;
+  }): Promise<void> {
+    try {
+      const updateData: any = {
+        title: content.title,
+        updatedAt: new Date()
+      };
+
+      if (content.description !== undefined) {
+        updateData.description = content.description;
+      }
+
+      if (content.textContent !== undefined) {
+        updateData.textContent = content.textContent;
+      }
+
+      if (content.category !== undefined) {
+        updateData.category = content.category;
+      }
+
+      if (content.meta !== undefined) {
+        updateData.meta = content.meta;
+      }
+
+      await db
+        .update(pages)
+        .set(updateData)
+        .where(eq(pages.id, pageId));
+
+      console.log(`Indexed content for page ${pageId}`);
+    } catch (error) {
+      console.error(`Failed to index content for page ${pageId}:`, error);
+      throw error;
+    }
+  }
+
+  // Hybrid search combining legacy and new systems
+  async searchContent(query: string, category?: string, options: {
+    limit?: number;
+    includeRanking?: boolean;
+    useFullText?: boolean;
+  } = {}): Promise<Array<{
+    id: string;
+    url: string;
+    title: string;
+    description: string;
+    category: string;
+    ranking?: number;
+    source: 'crawled_sites' | 'pages';
+    rankScore?: number;
+  }>> {
+    const {
+      limit = 20,
+      includeRanking = true,
+      useFullText = true
+    } = options;
+
+    const results: Array<{
+      id: string;
+      url: string;
+      title: string;
+      description: string;
+      category: string;
+      ranking?: number;
+      source: 'crawled_sites' | 'pages';
+      rankScore?: number;
+    }> = [];
+
+    try {
+      // Search pages table with full-text search
+      if (useFullText) {
+        const pageResults = await this.searchPagesFullText(query, {
+          category,
+          limit: Math.ceil(limit * 0.7), // 70% from pages
+          includeRanking,
+          includeHeadlines: false
+        });
+
+        results.push(...pageResults.results.map(page => ({
+          id: page.id,
+          url: page.url,
+          title: page.title || '',
+          description: page.description || '',
+          category: page.category || 'general',
+          source: 'pages' as const,
+          rankScore: page.rankScore
+        })));
+      }
+
+      // Search legacy crawled_sites table for remaining slots
+      const remainingLimit = limit - results.length;
+      if (remainingLimit > 0) {
+        const legacyResults = await this.searchCrawledSites(query, category);
+        
+        results.push(...legacyResults.slice(0, remainingLimit).map(site => ({
+          id: site.id,
+          url: site.url,
+          title: site.title || '',
+          description: site.description || '',
+          category: site.category || 'general',
+          ranking: site.ranking,
+          source: 'crawled_sites' as const
+        })));
+      }
+
+      // Sort by ranking/relevance
+      results.sort((a, b) => {
+        const aScore = a.rankScore || a.ranking || 0;
+        const bScore = b.rankScore || b.ranking || 0;
+        return bScore - aScore;
+      });
+
+      return results.slice(0, limit);
+    } catch (error) {
+      console.error('Hybrid search failed:', error);
+      // Fallback to legacy search
+      const legacyResults = await this.searchCrawledSites(query, category);
+      return legacyResults.map(site => ({
+        id: site.id,
+        url: site.url,
+        title: site.title || '',
+        description: site.description || '',
+        category: site.category || 'general',
+        ranking: site.ranking,
+        source: 'crawled_sites' as const
+      }));
+    }
   }
 }
 

@@ -6,6 +6,8 @@ import { generateAIResponse, categorizeSearchQuery } from "./openai";
 import { webCrawler } from "./crawler";
 import { CrawlerCore } from "./crawler-core";
 import { crawlerDiscoveryIntegration, enhancedCrawler } from "./crawler-integration";
+import { DatabaseInitializer } from "./database-init";
+import { ContentIndexer } from "./content-indexing";
 import { 
   insertSearchQuerySchema, 
   insertDomainSchema, 
@@ -17,6 +19,9 @@ import {
 import { ZodError } from "zod";
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Initialize database with full-text search capabilities
+  await DatabaseInitializer.initialize();
+  
   // Setup authentication
   setupAuth(app);
 
@@ -30,8 +35,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Auto-categorize if not specified
       const searchCategory = category === "all" ? await categorizeSearchQuery(query) : category;
 
-      // Search crawled sites
-      const searchResults = await storage.searchCrawledSites(query, searchCategory);
+      // Use hybrid search combining full-text search and legacy data
+      const searchResults = await storage.searchContent(query, searchCategory, {
+        limit: 20,
+        includeRanking: true,
+        useFullText: true
+      });
 
       // Generate AI response
       const aiResponse = await generateAIResponse(query, searchResults);
@@ -183,6 +192,164 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Failed to fetch webmaster stats:", error);
       res.status(500).json({ message: "Failed to fetch statistics" });
+    }
+  });
+
+  // === CONTENT INDEXING API ENDPOINTS ===
+
+  // Index content for a specific page
+  app.post("/api/indexing/index-page", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { url, html } = req.body;
+      
+      if (!url || !html) {
+        return res.status(400).json({ message: "URL and HTML content are required" });
+      }
+
+      // Process the content with our indexing system
+      const indexingResult = await ContentIndexer.indexContent(html, url);
+      
+      if (!indexingResult.success) {
+        return res.status(500).json({ 
+          message: "Content indexing failed", 
+          error: indexingResult.error 
+        });
+      }
+
+      // Check if page exists, if not create it
+      let page = await storage.getPage(url);
+      
+      if (!page) {
+        // Create new page entry
+        const domain = new URL(url).hostname;
+        let domainRecord = await storage.getDomain(domain);
+        
+        if (!domainRecord) {
+          domainRecord = await storage.createDomain({
+            domain,
+            status: 'active',
+            priority: 50
+          });
+        }
+
+        page = await storage.createPage({
+          domainId: domainRecord.id,
+          url,
+          httpStatus: 200,
+          title: indexingResult.content.title,
+          description: indexingResult.content.description,
+          textContent: indexingResult.content.textContent,
+          category: indexingResult.category.primary,
+          meta: {
+            ...indexingResult.content.meta,
+            headings: indexingResult.content.headings.join(' '),
+            keywords: indexingResult.category.keywords.join(' '),
+            categoryConfidence: indexingResult.category.confidence,
+            wordCount: indexingResult.content.wordCount
+          },
+          contentHash: indexingResult.content.contentHash
+        });
+      } else {
+        // Update existing page
+        await storage.indexPageContent(page.id, {
+          title: indexingResult.content.title,
+          description: indexingResult.content.description,
+          textContent: indexingResult.content.textContent,
+          category: indexingResult.category.primary,
+          meta: {
+            ...indexingResult.content.meta,
+            headings: indexingResult.content.headings.join(' '),
+            keywords: indexingResult.category.keywords.join(' '),
+            categoryConfidence: indexingResult.category.confidence,
+            wordCount: indexingResult.content.wordCount
+          }
+        });
+      }
+
+      res.json({
+        message: "Content indexed successfully",
+        pageId: page.id,
+        indexingResult: {
+          category: indexingResult.category.primary,
+          confidence: indexingResult.category.confidence,
+          keywords: indexingResult.category.keywords,
+          wordCount: indexingResult.content.wordCount,
+          extractedTitle: indexingResult.content.title
+        }
+      });
+    } catch (error) {
+      console.error("Content indexing error:", error);
+      res.status(500).json({ message: "Failed to index content" });
+    }
+  });
+
+  // Get indexing status and statistics
+  app.get("/api/indexing/status", async (req, res) => {
+    try {
+      const dbStatus = await DatabaseInitializer.getStatus();
+      
+      // Get some basic stats
+      const totalPagesResult = await storage.getCrawlQueueStats();
+      
+      res.json({
+        indexingSystem: {
+          status: DatabaseInitializer.isInitialized() ? "active" : "inactive",
+          database: dbStatus
+        },
+        statistics: {
+          totalPages: totalPagesResult.total,
+          queuedPages: totalPagesResult.pending
+        }
+      });
+    } catch (error) {
+      console.error("Failed to get indexing status:", error);
+      res.status(500).json({ message: "Failed to get indexing status" });
+    }
+  });
+
+  // Test full-text search functionality
+  app.post("/api/indexing/test-search", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const { query, category } = req.body;
+      
+      if (!query) {
+        return res.status(400).json({ message: "Search query is required" });
+      }
+
+      const results = await storage.searchPagesFullText(query, {
+        category,
+        limit: 10,
+        includeRanking: true,
+        includeHeadlines: true
+      });
+
+      res.json({
+        query,
+        category: category || 'all',
+        results: results.results.map(page => ({
+          id: page.id,
+          url: page.url,
+          title: page.title,
+          description: page.description,
+          category: page.category,
+          rankScore: page.rankScore,
+          headlineTitle: page.headlineTitle,
+          headlineDescription: page.headlineDescription
+        })),
+        totalCount: results.totalCount,
+        searchStats: results.searchStats
+      });
+    } catch (error) {
+      console.error("Test search error:", error);
+      res.status(500).json({ message: "Test search failed" });
     }
   });
 
