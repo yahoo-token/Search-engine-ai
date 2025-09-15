@@ -25,6 +25,7 @@ const SEED_DOMAINS: DomainSeed[] = [
   { domain: 'apple.com', category: 'companies', priority: 100, description: 'Apple Inc.' },
   { domain: 'amazon.com', category: 'companies', priority: 100, description: 'Amazon.com Inc.' },
   { domain: 'meta.com', category: 'companies', priority: 100, description: 'Meta (Facebook)' },
+  { domain: 'qwegle.com', category: 'companies', priority: 95, description: 'Qwegle - Technology Company' },
   { domain: 'netflix.com', category: 'companies', priority: 95, description: 'Netflix Inc.' },
   { domain: 'tesla.com', category: 'companies', priority: 95, description: 'Tesla Motors' },
   { domain: 'salesforce.com', category: 'companies', priority: 90, description: 'Salesforce CRM' },
@@ -621,7 +622,7 @@ export class DomainSeeder {
         await this.storage.addToCrawlQueue({
           domainId: domain.id!,
           url: `https://${domain.domain}`,
-          priority: domain.priority,
+          priority: domain.priority || 50,
           reason: 'seed'
         });
 
