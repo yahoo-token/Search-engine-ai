@@ -39,3 +39,37 @@ npm install
 
 # Start development server
 npm run dev
+
+
+📸 Screenshots
+
+Work in Progress UI — replace these with actual screenshots
+
+
+📌 Roadmap
+
+ Implement core search API
+
+ Integrate Yahoo Token validation
+
+ Build AI-driven ranking system
+
+ Create user-friendly web UI
+
+ Add analytics dashboard
+
+🤝 Contributing
+
+Contributions, issues, and feature requests are welcome!
+Feel free to open a PR or create an issue in the tracker.
+
+📄 License
+
+This project is licensed under the MIT License.
+See LICENSE
+for details.
+
+
+---
+
+👉 Do you want me to also create a **badge section** (like GitHub stars, issues, license, build status) at the top so it looks even more stylish and professional?
