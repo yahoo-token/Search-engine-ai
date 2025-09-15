@@ -300,7 +300,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({
         balance: user?.yhtBalance || "0",
         transactions: transactions.slice(0, 10), // Last 10 transactions
-        contractAddress: "0x3279eF4614f241a389114C77CdD28b70fcA9537a",
+        contractAddress: "0xb03e9886c74dcbfb581144991cc6415e46b47e4f",
       });
     } catch (error) {
       console.error("Failed to fetch wallet data:", error);
@@ -316,8 +316,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Get YHT token price from external API
   app.get("/api/yht-price", async (req, res) => {
-    // YHT token contract address on BSC - declare outside try block to avoid scope issues
-    const YHT_CONTRACT = "0x3279eF4614f241a389114C77CdD28b70fcA9537a";
+    // YHT token contract address on BSC - updated to correct address
+    const YHT_CONTRACT = "0xb03e9886c74dcbfb581144991cc6415e46b47e4f";
     const CACHE_TTL = 60 * 1000; // 60 seconds in milliseconds
     
     try {
@@ -368,7 +368,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         }
       } catch (error) {
-        console.warn("CoinGecko API failed:", error.message);
+        console.warn("CoinGecko API failed:", (error as Error).message);
       }
       
       // Fallback to PancakeSwap Info API  
@@ -402,7 +402,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             }
           }
         } catch (error) {
-          console.warn("PancakeSwap Info API failed:", error.message);
+          console.warn("PancakeSwap Info API failed:", (error as Error).message);
         }
       }
       
@@ -532,7 +532,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           domainRecord = await storage.createDomain({
             domain,
             status: 'active',
-            priority: 50
+            priority: 50,
+            crawlDelayMs: 1000
           });
         }
 
@@ -944,7 +945,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           domain: domainName,
           status: 'active',
           robotsTxt: JSON.stringify(result.robotsTxt),
-          robotsFetchedAt: new Date()
+          robotsFetchedAt: new Date(),
+          crawlDelayMs: 1000,
+          priority: 50
         });
       }
 
@@ -999,7 +1002,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.error("Failed to crawl URL:", error);
       res.status(500).json({ 
         message: "Failed to crawl URL", 
-        error: error.message 
+        error: (error as Error).message 
       });
     }
   });
@@ -1025,7 +1028,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!domain) {
         domain = await storage.createDomain({
           domain: domainName,
-          status: 'active'
+          status: 'active',
+          crawlDelayMs: 1000,
+          priority: 50
         });
       }
 
