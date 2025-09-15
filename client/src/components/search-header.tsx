@@ -165,7 +165,7 @@ export default function SearchHeader({ onSearch }: SearchHeaderProps) {
                 <Button
                   variant="outline"
                   className="flex items-center space-x-2"
-                  data-testid="button-submit-website"
+                  data-testid="button-submit-nav"
                 >
                   <Plus className="w-4 h-4" />
                   <span>Submit Website</span>

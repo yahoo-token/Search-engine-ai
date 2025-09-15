@@ -21,13 +21,7 @@ const submitWebsiteSchema = z.object({
     .min(1, "URL is required"),
   category: z.enum(["companies", "shopping", "news", "saas", "cloud", "web3"], {
     required_error: "Please select a category"
-  }),
-  description: z.string()
-    .min(10, "Description must be at least 10 characters")
-    .max(500, "Description must be less than 500 characters"),
-  contactEmail: z.string()
-    .email("Please enter a valid email address")
-    .optional()
+  })
 });
 
 type SubmitWebsiteFormData = z.infer<typeof submitWebsiteSchema>;
@@ -47,9 +41,7 @@ export default function SubmitWebsitePage() {
     resolver: zodResolver(submitWebsiteSchema),
     defaultValues: {
       url: "",
-      category: undefined,
-      description: "",
-      contactEmail: ""
+      category: undefined
     }
   });
 
@@ -172,52 +164,6 @@ export default function SubmitWebsitePage() {
                             </Select>
                             <FormDescription>
                               Choose the category that best describes your website's primary focus.
-                            </FormDescription>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-
-                      {/* Description Field */}
-                      <FormField
-                        control={form.control}
-                        name="description"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Description *</FormLabel>
-                            <FormControl>
-                              <Textarea
-                                placeholder="Describe what your website is about, what products/services you offer, and any key information that would help users find you..."
-                                className="min-h-[100px]"
-                                data-testid="textarea-description"
-                                {...field}
-                              />
-                            </FormControl>
-                            <FormDescription>
-                              Provide a detailed description to help our AI understand and categorize your content.
-                            </FormDescription>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-
-                      {/* Contact Email Field */}
-                      <FormField
-                        control={form.control}
-                        name="contactEmail"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Contact Email (Optional)</FormLabel>
-                            <FormControl>
-                              <Input
-                                type="email"
-                                placeholder="contact@yourwebsite.com"
-                                data-testid="input-contact-email"
-                                {...field}
-                              />
-                            </FormControl>
-                            <FormDescription>
-                              We'll notify you when your website has been indexed (optional).
                             </FormDescription>
                             <FormMessage />
                           </FormItem>

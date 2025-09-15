@@ -139,24 +139,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Website submission endpoint for users to add their sites
   const submitWebsiteSchema = z.object({
     url: z.string().url("Please enter a valid URL"),
-    category: z.enum(["companies", "shopping", "news", "saas", "cloud", "web3"]),
-    description: z.string().min(10, "Description must be at least 10 characters").max(500, "Description must be less than 500 characters"),
-    contactEmail: z.string().email().optional()
+    category: z.enum(["companies", "shopping", "news", "saas", "cloud", "web3"])
   });
 
   app.post("/api/submit-website", async (req, res) => {
     try {
       // Validate input using Zod schema
       const validatedData = submitWebsiteSchema.parse(req.body);
-      const { url, category, description, contactEmail } = validatedData;
+      const { url, category } = validatedData;
 
       // Extract domain from URL
       const urlObj = new URL(url);
       const domain = urlObj.hostname.replace(/^www\./, "");
 
-      // Check if domain already exists
-      const existingDomains = await storage.listDomains('all', 1, domain);
-      if (existingDomains.length > 0) {
+      // Check if domain already exists (search across all categories)
+      const existingDomains = await storage.listDomains("all", 100); // Get more results to check properly
+      const domainExists = existingDomains.some(d => d.domain === domain);
+      if (domainExists) {
         return res.status(400).json({
           success: false,
           message: "This website has already been submitted and is being crawled."
@@ -168,9 +167,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         domain,
         status: "pending",
         priority: 75, // High priority for user submissions
-        crawlDelayMs: 1000,
-        description,
-        contactEmail
+        crawlDelayMs: 1000
       });
 
       // Add homepage URL to crawl queue
@@ -180,7 +177,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           domainId: domainData.id!,
           url,
           priority: 75,
-          reason: "user_submission"
+          reason: "seed" // Use valid reason type
         });
         queuedUrls = 1;
       } catch (error) {
