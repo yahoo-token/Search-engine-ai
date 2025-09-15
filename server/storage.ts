@@ -27,7 +27,7 @@ import {
   type InsertFetchLog,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc, like, ilike, and, asc, lte, gte, isNull, sql } from "drizzle-orm";
+import { eq, desc, like, ilike, and, asc, lte, gte, isNull, sql, or } from "drizzle-orm";
 import session from "express-session";
 import connectPg from "connect-pg-simple";
 
@@ -953,27 +953,109 @@ export class DatabaseStorage implements IStorage {
         source: 'crawled_sites' | 'pages';
       }> = [];
 
+      // Special handling for default results when no category filter or "all" category
+      // Prioritize YHT-related websites in the results
+      if (!category || category === 'all') {
+        // First, get YHT-related content from pages table
+        const yhtDomains = ['yahootoken.com', 'yahootoken.live', 'coinmarketcap.com', 'coingecko.com', 'pancakeswap.finance', 'bscscan.com', 'poocoin.app'];
+        const yhtPages = await db
+          .select()
+          .from(pages)
+          .where(
+            or(...yhtDomains.map(domain => 
+              like(pages.url, `%${domain}%`)
+            ))
+          )
+          .orderBy(desc(pages.lastFetchedAt), desc(pages.createdAt))
+          .limit(Math.min(8, Math.ceil(limit * 0.4))); // 40% of results reserved for YHT content
+        
+        results.push(...yhtPages.map(page => ({
+          id: page.id,
+          url: page.url,
+          title: page.title || `YHT - ${page.url}`,
+          description: page.description || `Yahoo Token (YHT) related content from ${page.url}`,
+          category: page.category || 'web3',
+          source: 'pages' as const
+        })));
+
+        // If no YHT pages found, add default YHT entries
+        if (results.length === 0) {
+          const defaultYHTResults = [
+            {
+              id: 'default-yht-cmc',
+              url: 'https://coinmarketcap.com/currencies/yahoo-token/',
+              title: 'Yahoo Token (YHT) Price & Market Data - CoinMarketCap',
+              description: 'Get the latest Yahoo Token price, YHT market cap, trading pairs, charts and data from the world\'s number one cryptocurrency price-tracking website.',
+              category: 'web3',
+              ranking: 100,
+              source: 'crawled_sites' as const
+            },
+            {
+              id: 'default-yht-coingecko',
+              url: 'https://coingecko.com/en/coins/yahoo-token',
+              title: 'Yahoo Token (YHT) Price Live Data - CoinGecko',
+              description: 'Track Yahoo Token\'s price in real-time with detailed charts, market analysis, and comprehensive cryptocurrency data on CoinGecko.',
+              category: 'web3',
+              ranking: 95,
+              source: 'crawled_sites' as const
+            },
+            {
+              id: 'default-yht-pancakeswap',
+              url: 'https://pancakeswap.finance/swap?outputCurrency=0xb03e9886c74dcbfb581144991cc6415e46b47e4f',
+              title: 'Swap Yahoo Token (YHT) on PancakeSwap',
+              description: 'Trade Yahoo Token directly on PancakeSwap DEX. Best prices and liquidity for YHT trading on Binance Smart Chain.',
+              category: 'web3',
+              ranking: 90,
+              source: 'crawled_sites' as const
+            },
+            {
+              id: 'default-yht-bscscan',
+              url: 'https://bscscan.com/token/0xb03e9886c74dcbfb581144991cc6415e46b47e4f',
+              title: 'Yahoo Token (YHT) BSC Contract - BscScan',
+              description: 'View Yahoo Token contract details, transactions, holders, and analytics on BSC blockchain explorer.',
+              category: 'web3',
+              ranking: 85,
+              source: 'crawled_sites' as const
+            },
+            {
+              id: 'default-yht-poocoin',
+              url: 'https://poocoin.app/tokens/0xb03e9886c74dcbfb581144991cc6415e46b47e4f',
+              title: 'Yahoo Token (YHT) Chart & Analytics - PooCoin',
+              description: 'Real-time Yahoo Token price charts, trading volume, and detailed analytics on PooCoin DEX tracker.',
+              category: 'web3',
+              ranking: 80,
+              source: 'crawled_sites' as const
+            }
+          ];
+          
+          results.push(...defaultYHTResults.slice(0, Math.min(5, limit)));
+        }
+      }
+
       // Get top pages from pages table (based on recent activity and content)
       const pageConditions = [];
       if (category && category !== 'all') {
         pageConditions.push(eq(pages.category, category));
       }
 
-      const topPages = await db
-        .select()
-        .from(pages)
-        .where(pageConditions.length > 0 ? and(...pageConditions) : undefined)
-        .orderBy(desc(pages.lastFetchedAt), desc(pages.createdAt))
-        .limit(Math.ceil(limit * 0.6)); // 60% from pages
+      const remainingFromPages = Math.ceil((limit - results.length) * 0.6); // 60% of remaining from pages
+      if (remainingFromPages > 0) {
+        const topPages = await db
+          .select()
+          .from(pages)
+          .where(pageConditions.length > 0 ? and(...pageConditions) : undefined)
+          .orderBy(desc(pages.lastFetchedAt), desc(pages.createdAt))
+          .limit(remainingFromPages);
 
-      results.push(...topPages.map(page => ({
-        id: page.id,
-        url: page.url,
-        title: page.title || '',
-        description: page.description || '',
-        category: page.category || 'general',
-        source: 'pages' as const
-      })));
+        results.push(...topPages.map(page => ({
+          id: page.id,
+          url: page.url,
+          title: page.title || '',
+          description: page.description || '',
+          category: page.category || 'general',
+          source: 'pages' as const
+        })));
+      }
 
       // Get popular crawled sites for remaining slots
       const remainingLimit = limit - results.length;
@@ -996,7 +1078,7 @@ export class DatabaseStorage implements IStorage {
           title: site.title || '',
           description: site.description || '',
           category: site.category || 'general',
-          ranking: site.ranking,
+          ranking: site.ranking ?? undefined,
           source: 'crawled_sites' as const
         })));
       }
@@ -1046,7 +1128,7 @@ export class DatabaseStorage implements IStorage {
           title: site.title || '',
           description: site.description || '',
           category: site.category || 'general',
-          ranking: site.ranking,
+          ranking: site.ranking ?? undefined,
           source: 'crawled_sites' as const
         })),
         totalCount: totalCount[0]?.count || 0
