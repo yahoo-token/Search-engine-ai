@@ -17,6 +17,7 @@ import {
   type Page,
   type CrawlQueue
 } from "@shared/schema";
+import { z } from "zod";
 import { ZodError } from "zod";
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -131,6 +132,88 @@ export async function registerRoutes(app: Express): Promise<Server> {
         hasNextPage: false,
         hasPrevPage: false,
         error: "Search service temporarily unavailable"
+      });
+    }
+  });
+
+  // Website submission endpoint for users to add their sites
+  const submitWebsiteSchema = z.object({
+    url: z.string().url("Please enter a valid URL"),
+    category: z.enum(["companies", "shopping", "news", "saas", "cloud", "web3"]),
+    description: z.string().min(10, "Description must be at least 10 characters").max(500, "Description must be less than 500 characters"),
+    contactEmail: z.string().email().optional()
+  });
+
+  app.post("/api/submit-website", async (req, res) => {
+    try {
+      // Validate input using Zod schema
+      const validatedData = submitWebsiteSchema.parse(req.body);
+      const { url, category, description, contactEmail } = validatedData;
+
+      // Extract domain from URL
+      const urlObj = new URL(url);
+      const domain = urlObj.hostname.replace(/^www\./, "");
+
+      // Check if domain already exists
+      const existingDomains = await storage.listDomains('all', 1, domain);
+      if (existingDomains.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: "This website has already been submitted and is being crawled."
+        });
+      }
+
+      // Create domain entry
+      const domainData = await storage.createDomain({
+        domain,
+        status: "pending",
+        priority: 75, // High priority for user submissions
+        crawlDelayMs: 1000,
+        description,
+        contactEmail
+      });
+
+      // Add homepage URL to crawl queue
+      let queuedUrls = 0;
+      try {
+        await storage.addToCrawlQueue({
+          domainId: domainData.id!,
+          url,
+          priority: 75,
+          reason: "user_submission"
+        });
+        queuedUrls = 1;
+      } catch (error) {
+        console.error("Failed to queue URL:", error);
+      }
+
+      // Trigger immediate crawling by notifying the background crawler
+      console.log(`🆕 User submitted website: ${url} (${category})`);
+
+      res.json({
+        success: true,
+        message: "Website submitted successfully! Our crawler will begin indexing it within the next few minutes.",
+        domainId: domainData.id,
+        queuedUrls
+      });
+
+    } catch (error) {
+      if (error instanceof ZodError) {
+        const fieldErrors = error.errors.map(err => ({
+          field: err.path.join('.'),
+          message: err.message
+        }));
+        return res.status(400).json({ 
+          success: false,
+          message: "Validation failed",
+          errors: fieldErrors
+        });
+      }
+
+      console.error("Website submission error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to submit website. Please try again later."
       });
     }
   });

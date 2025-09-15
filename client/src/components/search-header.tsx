@@ -6,7 +6,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import WalletModal from "@/components/wallet-modal";
 import { useAuth } from "@/hooks/use-auth";
 import { useQuery } from "@tanstack/react-query";
-import { Search, Mic, User, LogOut, TrendingUp, TrendingDown } from "lucide-react";
+import { Link } from "wouter";
+import { Search, Mic, User, LogOut, TrendingUp, TrendingDown, Plus } from "lucide-react";
 
 interface SearchHeaderProps {
   onSearch: (query: string) => void;
@@ -159,6 +160,18 @@ export default function SearchHeader({ onSearch }: SearchHeaderProps) {
 
             {/* User Actions */}
             <div className="flex items-center space-x-4">
+              {/* Submit Website Button */}
+              <Link href="/submit">
+                <Button
+                  variant="outline"
+                  className="flex items-center space-x-2"
+                  data-testid="button-submit-website"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Submit Website</span>
+                </Button>
+              </Link>
+
               {/* Web3 Wallet Integration - Only show for logged in users */}
               {user && (
                 <Button
